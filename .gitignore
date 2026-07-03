@@ -1,0 +1,9 @@
+.pio/
+.vscode/
+include/secrets.h
+data/
+.DS_Store
+
+web/node_modules/
+web/dist/
+web/.env.local
