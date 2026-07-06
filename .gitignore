@@ -3,6 +3,7 @@
 include/secrets.h
 data/
 .DS_Store
+CLAUDE.md
 
 web/node_modules/
 web/dist/
