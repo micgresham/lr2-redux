@@ -48,6 +48,11 @@ void registerConfigApiRoutes(AsyncWebServer &server, DeviceConfig &cfg) {
     doc["mqttPort"] = cfg.mqttPort;
     doc["mqttUser"] = cfg.mqttUser;
     doc["waitTimerMin"] = cfg.waitTimerSec / 60;
+    doc["requireManualReset"] = cfg.requireManualReset;
+    doc["catPresentWarningMin"] = cfg.catPresentWarningSec / 60;
+    doc["dayStartHour"] = cfg.dayStartHour;
+    doc["dayEndHour"] = cfg.dayEndHour;
+    doc["drawerFullCycles"] = cfg.drawerFullCycles;
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
@@ -63,7 +68,35 @@ void registerConfigApiRoutes(AsyncWebServer &server, DeviceConfig &cfg) {
         if (obj["mqttPort"].is<int>()) cfg.mqttPort = obj["mqttPort"].as<int>();
         if (obj["waitTimerMin"].is<int>()) {
           int minutes = obj["waitTimerMin"].as<int>();
-          if (minutes > 0) cfg.waitTimerSec = (uint32_t)minutes * 60UL;
+          // Enforced minimum: give the cat enough time to actually leave the
+          // globe before it cycles, not just clear the weight switch briefly
+          // mid-shuffle. The web UI also enforces this, but the firmware is
+          // the authoritative check since /save can be hit directly.
+          if (minutes >= 2) cfg.waitTimerSec = (uint32_t)minutes * 60UL;
+        }
+        if (obj["requireManualReset"].is<bool>()) {
+          cfg.requireManualReset = obj["requireManualReset"].as<bool>();
+        }
+        if (obj["catPresentWarningMin"].is<int>()) {
+          int minutes = obj["catPresentWarningMin"].as<int>();
+          // Enforced minimum matches the original board's documented
+          // threshold - can be set higher (a more patient/tolerant
+          // threshold), not lower.
+          if (minutes >= 2) cfg.catPresentWarningSec = (uint32_t)minutes * 60UL;
+        }
+        if (obj["dayStartHour"].is<int>()) {
+          int h = obj["dayStartHour"].as<int>();
+          if (h >= 0 && h <= 23) cfg.dayStartHour = (uint8_t)h;
+        }
+        if (obj["dayEndHour"].is<int>()) {
+          int h = obj["dayEndHour"].as<int>();
+          if (h >= 0 && h <= 23) cfg.dayEndHour = (uint8_t)h;
+        }
+        if (obj["drawerFullCycles"].is<int>()) {
+          int cycles = obj["drawerFullCycles"].as<int>();
+          // Enforced minimum of 1 - a threshold of 0 would mean "always
+          // full," which isn't a meaningful setting.
+          if (cycles >= 1) cfg.drawerFullCycles = (uint32_t)cycles;
         }
         // blank password fields mean "leave unchanged", not "clear it"
         if (obj["wifiPass"].is<const char *>() && strlen(obj["wifiPass"]) > 0) {

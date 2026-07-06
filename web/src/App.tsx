@@ -8,12 +8,17 @@ import {
   Grid,
   Heading,
   Meter,
+  Tab,
+  Tabs,
   Text,
 } from "grommet";
 import { useLr2Socket } from "./hooks/useLr2Socket";
 import { StatusPill } from "./components/StatusPill";
 import { DeviceBar } from "./components/DeviceBar";
 import { SettingsCard } from "./components/SettingsCard";
+import { UsageCard } from "./components/UsageCard";
+import { FirmwareUpdateCard } from "./components/FirmwareUpdateCard";
+import { AnalyticsPage } from "./components/AnalyticsPage";
 
 const STORAGE_KEY = "lr2redux.deviceUrl";
 const UPDATE_STALE_MS = 15_000; // 3x the firmware's 5s broadcast interval
@@ -39,6 +44,22 @@ function loadDeviceUrl(): string {
   return localStorage.getItem(STORAGE_KEY) ?? deriveDefaultDeviceUrl();
 }
 
+// Standard WiFi RSSI bands (dBm) - added specifically to help diagnose the
+// recurring ASSOC_LEAVE connection issue: a consistently weak reading here
+// at the board's install location points at signal/interference, not
+// power or firmware.
+function rssiLabel(rssi: number): string {
+  if (rssi >= -50) return "Excellent";
+  if (rssi >= -60) return "Good";
+  if (rssi >= -70) return "Fair";
+  if (rssi >= -80) return "Weak";
+  return "Very weak";
+}
+
+function rssiColor(rssi: number): string | undefined {
+  return rssi < -75 ? "state-fault" : undefined;
+}
+
 export default function App() {
   const [deviceUrl, setDeviceUrl] = useState<string>(loadDeviceUrl);
   const [now, setNow] = useState(() => Date.now());
@@ -55,6 +76,10 @@ export default function App() {
     drawerThreshold,
     lastUpdateAt,
     uptimeSeconds,
+    needsManualReset,
+    catPresentWarning,
+    ipAddress,
+    rssi,
     sendCommand,
   } = telemetry;
 
@@ -77,11 +102,13 @@ export default function App() {
 
   const canCycle = connectionStatus === "connected" && state === "idle";
   const canResetFault = connectionStatus === "connected" && state === "fault";
+  const canResume =
+    connectionStatus === "connected" && state === "safety_stop" && needsManualReset === true;
 
   return (
     <Box fill background="background" pad={{ horizontal: "medium", vertical: "medium" }}>
       <Box width={{ max: "960px" }} margin={{ horizontal: "auto" }} fill="horizontal" gap="medium">
-        <Box>
+        <Box margin={{ bottom: "small" }} border={{ side: "bottom", color: "border" }} pad={{ bottom: "small" }}>
           <Text
             size="xsmall"
             weight="bold"
@@ -90,7 +117,7 @@ export default function App() {
           >
             LR2-Redux dashboard
           </Text>
-          <Heading level={1} margin={{ vertical: "xsmall" }} size="small">
+          <Heading level={1} margin={{ top: "xsmall", bottom: "none" }} size="small">
             Litter Robot 2
           </Heading>
         </Box>
@@ -102,6 +129,9 @@ export default function App() {
           error={lastError}
         />
 
+        <Tabs>
+        <Tab title="Dashboard">
+        <Box margin={{ top: "medium" }}>
         <Grid columns={{ count: "fit", size: "medium" }} gap="medium">
           <Card>
             <CardHeader pad="medium">
@@ -113,8 +143,12 @@ export default function App() {
                 <Text color="text-weak" size="small">
                   Cat present
                 </Text>
-                <Text weight="bold">
+                <Text
+                  weight="bold"
+                  color={catPresentWarning ? "state-fault" : undefined}
+                >
                   {catPresent === null ? "—" : catPresent ? "Yes" : "No"}
+                  {catPresentWarning ? " (a while)" : ""}
                 </Text>
               </Box>
               <Box direction="row" justify="between">
@@ -139,6 +173,20 @@ export default function App() {
                   {uptimeSeconds === null
                     ? "—"
                     : `${Math.floor(uptimeSeconds / 60)}m ${uptimeSeconds % 60}s`}
+                </Text>
+              </Box>
+              <Box direction="row" justify="between">
+                <Text color="text-weak" size="small">
+                  IP address
+                </Text>
+                <Text weight="bold">{ipAddress ?? "—"}</Text>
+              </Box>
+              <Box direction="row" justify="between">
+                <Text color="text-weak" size="small">
+                  WiFi signal
+                </Text>
+                <Text weight="bold" color={rssi !== null ? rssiColor(rssi) : undefined}>
+                  {rssi === null ? "—" : `${rssi} dBm (${rssiLabel(rssi)})`}
                 </Text>
               </Box>
             </CardBody>
@@ -211,11 +259,38 @@ export default function App() {
                   ? "Clears the fault and re-homes the globe."
                   : "Enabled when the unit reports a fault."}
               </Text>
+
+              <Button
+                label="Resume"
+                onClick={() => sendCommand("resume")}
+                disabled={!canResume}
+              />
+              <Text size="xsmall" color="text-weak">
+                {state === "safety_stop" && needsManualReset
+                  ? "A pinch was detected (or manual reset is required) — confirm it's clear to continue."
+                  : "Enabled when a safety-stop needs manual confirmation to resume."}
+              </Text>
             </CardBody>
           </Card>
 
-          <SettingsCard deviceUrl={deviceUrl} />
+          <UsageCard deviceUrl={deviceUrl} />
         </Grid>
+        </Box>
+        </Tab>
+
+        <Tab title="Analytics">
+        <Box margin={{ top: "medium" }}>
+          <AnalyticsPage deviceUrl={deviceUrl} />
+        </Box>
+        </Tab>
+
+        <Tab title="Settings">
+        <Box margin={{ top: "medium" }} gap="medium">
+          <SettingsCard deviceUrl={deviceUrl} />
+          <FirmwareUpdateCard deviceUrl={deviceUrl} />
+        </Box>
+        </Tab>
+        </Tabs>
       </Box>
     </Box>
   );

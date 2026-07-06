@@ -14,6 +14,29 @@ struct DeviceConfig {
   String mqttUser;
   String mqttPass;
   uint32_t waitTimerSec = 420; // 7 min default, matches the original hardcoded behavior
+  // Default: only anti-pinch-triggered SAFETY_STOP requires manual reset;
+  // weight-triggered ones auto-resume after WEIGHT_SAFETY_COOLDOWN_MS. When
+  // true, matches the original stock board's behavior exactly - ANY
+  // interruption (weight or anti-pinch) requires pressing a button / an
+  // explicit "resume" command, nothing auto-resumes.
+  bool requireManualReset = false;
+  // How long the weight switch can stay continuously active (cat present)
+  // before it's flagged as a warning (flashing red on the original board) -
+  // default matches the original's documented 2-minute threshold. Enforced
+  // minimum of 2 min in config_api.cpp; can be set higher, not lower.
+  uint32_t catPresentWarningSec = 120;
+  // Hour-of-day (0-23) boundary used only by the dashboard's Analytics page
+  // to split "average time between visits" into day vs. night buckets. The
+  // firmware never interprets these itself - classification happens
+  // client-side against each visit's local browser time, so DST/timezone is
+  // never a firmware concern here. Default 6am-8pm.
+  uint8_t dayStartHour = 6;
+  uint8_t dayEndHour = 20;
+  // Stock LR2 warns the drawer is full after a set number of cycles since
+  // it was last emptied - varies by household (litter type, number of
+  // cats), so it's user-tunable rather than a fixed guess. Default matches
+  // the original hardcoded value; enforced minimum of 1 in config_api.cpp.
+  uint32_t drawerFullCycles = 10;
 };
 
 void loadConfig(DeviceConfig &cfg);

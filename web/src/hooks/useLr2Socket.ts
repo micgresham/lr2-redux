@@ -16,7 +16,7 @@ export type ConnectionStatus =
   | "connected"
   | "error";
 
-export type Lr2Command = "cycle" | "reset_fault" | "drawer_emptied";
+export type Lr2Command = "cycle" | "reset_fault" | "drawer_emptied" | "resume";
 
 export interface Lr2Telemetry {
   connectionStatus: ConnectionStatus;
@@ -29,6 +29,10 @@ export interface Lr2Telemetry {
   drawerThreshold: number | null;
   lastUpdateAt: number | null;
   uptimeSeconds: number | null;
+  needsManualReset: boolean | null;
+  catPresentWarning: boolean | null;
+  ipAddress: string | null;
+  rssi: number | null;
   sendCommand: (cmd: Lr2Command) => void;
 }
 
@@ -40,6 +44,10 @@ interface Lr2StatePayload {
   drawerCycles: number;
   drawerThreshold: number;
   uptimeSeconds: number;
+  needsManualReset: boolean;
+  catPresentWarning: boolean;
+  ipAddress: string;
+  rssi: number;
 }
 
 const RECONNECT_DELAY_MS = 3000;
@@ -126,6 +134,10 @@ export function useLr2Socket(deviceUrl: string | null): Lr2Telemetry {
     drawerThreshold: payload.drawerThreshold ?? null,
     lastUpdateAt,
     uptimeSeconds: payload.uptimeSeconds ?? null,
+    needsManualReset: payload.needsManualReset ?? null,
+    catPresentWarning: payload.catPresentWarning ?? null,
+    ipAddress: payload.ipAddress || null,
+    rssi: connectionStatus === "connected" ? payload.rssi ?? null : null,
     sendCommand,
   };
 }

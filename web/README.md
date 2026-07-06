@@ -2,9 +2,10 @@
 
 A [Grommet](https://v2.grommet.io/) + React single-page app that talks
 **directly to the ESP32's built-in WebSocket server** — no MQTT broker
-involved on the browser side at all. It shows live state, cat/drawer status,
-lets you send `cycle`, `reset_fault`, and `drawer_emptied` commands, and
-configure WiFi/MQTT/wait-timer.
+involved on the browser side at all. Organized into three tabs: **Dashboard**
+(live state, commands, usage summary), **Analytics** (visit history and
+day/night interval stats), and **Settings** (WiFi/MQTT/behavior config plus
+firmware updates).
 
 **The board serves this app itself** (`npm run build:device` + `pio run -t
 uploadfs` from the repo root — see the root README) — visiting
@@ -55,22 +56,57 @@ match what the firmware's LittleFS-based static server expects.
 
 ## What it shows
 
+### Dashboard tab
+
 - **Status** — current state (idle / cat present / waiting / cycling / safety
-  stop / fault), cat-present flag, cycle count, and a freshness indicator
-  (flags red if no update in >15s, 3x the firmware's broadcast interval).
+  stop / fault), cat-present flag (flagged red with "(a while)" once it
+  exceeds the configurable cat-present warning threshold), cycle count, a
+  freshness indicator (flags red if no update in >15s, 3x the firmware's
+  broadcast interval), uptime, IP address, and WiFi signal strength (dBm plus
+  a qualitative Excellent/Good/Fair/Weak/Very weak label, colored red below
+  -75dBm).
 - **Drawer** — cycles since last emptied against the configurable threshold
   reported by the firmware, plus a "Mark drawer emptied" button.
-- **Actions** — "Cycle now" (enabled only when idle) and "Reset fault"
-  (enabled only when faulted).
-- **Settings** — WiFi SSID (with a "Scan for networks" button), WiFi
-  password, MQTT host/port/user/password, and the cat-leaves wait timer in
-  minutes. Talks to the same `/scan`, `/config`, `/save` HTTP routes the
-  captive-portal setup page uses (see the root README's "Config HTTP API"
-  section) — this is the same config surface, just reachable once the board
-  is already on your network instead of only during first-time setup.
-  Saving reboots the board; if you changed the WiFi network, the dashboard
-  won't be able to reach it again until you reconnect to that network too.
+- **Actions** — "Cycle now" (enabled only when idle), "Reset fault" (enabled
+  only when faulted), and "Resume" (enabled only during a `SAFETY_STOP` that
+  needs an explicit manual confirmation — see the root README's "Manual-reset"
+  notes for when that applies).
+- **Usage** — today/this-week/last-30-days visit totals and a 30-day daily
+  bar chart. Computed **client-side** from the raw visit-timestamp array the
+  device reports, bucketed by the viewer's own local calendar day — not
+  trusted from the device's own precomputed totals, which use a rolling
+  24-hour window in the device's UTC clock rather than a real calendar day
+  in your timezone (`UsageCard.tsx`).
 
-No authentication is implemented — anyone who can reach the board's `/ws`
-endpoint and knows the command names can send commands. Fine on a home LAN;
-put it behind your own auth/reverse proxy if it's exposed further than that.
+### Analytics tab
+
+- **Day / night hours** — editable start/end hours (default 6am–8pm) used to
+  split visit intervals below. Saves through the same config API as the
+  Settings tab (saving reboots the board).
+- **Average time between visits** — the average gap between consecutive
+  visits, computed separately for visits classified as "day" vs. "night"
+  by each visit's local hour in your browser.
+- **Recent visits** — a scrollable list of the most recent visit timestamps
+  (up to the last 300 the device stores), each tagged Day or Night.
+
+### Settings tab
+
+- WiFi SSID (with a "Scan for networks" button) and password, MQTT
+  host/port/user/password, the cat-leaves wait timer, and — under a
+  collapsible "Advanced settings" section — the cat-present warning
+  threshold, "require manual reset after any interruption," and cycles until
+  the drawer is considered full. Talks to the same `/scan`, `/config`,
+  `/save` HTTP routes the captive-portal setup page uses (see the root
+  README's "Config HTTP API" section) — this is the same config surface,
+  just reachable once the board is already on your network instead of only
+  during first-time setup. Saving reboots the board; if you changed the
+  WiFi network, the dashboard won't be able to reach it again until you
+  reconnect to that network too.
+- **Firmware update** — upload a new `firmware.bin` directly from the
+  browser (password-protected with the same `OTA_PASSWORD` as command-line
+  OTA), with an upload-progress indicator.
+
+No authentication is implemented beyond the firmware-update password above —
+anyone who can reach the board's `/ws` endpoint and knows the command names
+can send commands. Fine on a home LAN; put it behind your own auth/reverse
+proxy if it's exposed further than that.

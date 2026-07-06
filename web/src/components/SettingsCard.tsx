@@ -1,6 +1,10 @@
 import { useEffect, useState } from "react";
-import { Box, Button, Card, CardBody, CardHeader, Text, TextInput } from "grommet";
+import { Box, Button, Card, CardBody, CardHeader, CheckBox, Text, TextInput } from "grommet";
 import { useDeviceConfigApi } from "../hooks/useDeviceConfigApi";
+
+const MIN_WAIT_TIMER_MIN = 2;
+const MIN_CAT_WARNING_MIN = 2;
+const MIN_DRAWER_FULL_CYCLES = 1;
 
 export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
   const { config, networks, scanning, saving, error, fetchConfig, scan, save } =
@@ -13,7 +17,12 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
   const [mqttUser, setMqttUser] = useState("");
   const [mqttPass, setMqttPass] = useState("");
   const [waitTimerMin, setWaitTimerMin] = useState("7");
+  const [requireManualReset, setRequireManualReset] = useState(false);
+  const [catPresentWarningMin, setCatPresentWarningMin] = useState("2");
+  const [drawerFullCycles, setDrawerFullCycles] = useState("10");
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [validationError, setValidationError] = useState<string | null>(null);
+  const [showAdvanced, setShowAdvanced] = useState(false);
 
   useEffect(() => {
     fetchConfig();
@@ -26,10 +35,39 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
     setMqttPort(String(config.mqttPort ?? 1883));
     setMqttUser(config.mqttUser ?? "");
     setWaitTimerMin(String(config.waitTimerMin ?? 7));
+    setRequireManualReset(config.requireManualReset ?? false);
+    setCatPresentWarningMin(String(config.catPresentWarningMin ?? 2));
+    setDrawerFullCycles(String(config.drawerFullCycles ?? 10));
   }, [config]);
 
   const handleSave = async () => {
     setSavedMsg(null);
+    setValidationError(null);
+
+    const waitTimerValue = parseInt(waitTimerMin, 10) || 0;
+    if (waitTimerValue < MIN_WAIT_TIMER_MIN) {
+      setValidationError(
+        `Wait time can't be less than ${MIN_WAIT_TIMER_MIN} minutes — that's how long the cat gets to actually leave the globe before it cycles.`,
+      );
+      return;
+    }
+
+    const catWarningValue = parseInt(catPresentWarningMin, 10) || 0;
+    if (catWarningValue < MIN_CAT_WARNING_MIN) {
+      setValidationError(
+        `Cat-present warning can't be less than ${MIN_CAT_WARNING_MIN} minutes.`,
+      );
+      return;
+    }
+
+    const drawerFullValue = parseInt(drawerFullCycles, 10) || 0;
+    if (drawerFullValue < MIN_DRAWER_FULL_CYCLES) {
+      setValidationError(
+        `Cycles to drawer full can't be less than ${MIN_DRAWER_FULL_CYCLES}.`,
+      );
+      return;
+    }
+
     const changingWifi = config !== null && wifiSsid !== config.wifiSsid;
     const ok = await save({
       wifiSsid,
@@ -38,7 +76,10 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
       mqttPort: parseInt(mqttPort, 10) || 1883,
       mqttUser,
       mqttPass,
-      waitTimerMin: parseInt(waitTimerMin, 10) || 7,
+      waitTimerMin: waitTimerValue,
+      requireManualReset,
+      catPresentWarningMin: catWarningValue,
+      drawerFullCycles: drawerFullValue,
     });
     if (ok) {
       setSavedMsg(
@@ -123,27 +164,15 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
           />
         </Box>
 
-        <Box direction="row" gap="small">
-          <Box flex gap="xsmall">
-            <Text size="small" color="text-weak">
-              MQTT port
-            </Text>
-            <TextInput
-              type="number"
-              value={mqttPort}
-              onChange={(e) => setMqttPort(e.target.value)}
-            />
-          </Box>
-          <Box flex gap="xsmall">
-            <Text size="small" color="text-weak">
-              Wait time (min)
-            </Text>
-            <TextInput
-              type="number"
-              value={waitTimerMin}
-              onChange={(e) => setWaitTimerMin(e.target.value)}
-            />
-          </Box>
+        <Box gap="xsmall">
+          <Text size="small" color="text-weak">
+            MQTT port
+          </Text>
+          <TextInput
+            type="number"
+            value={mqttPort}
+            onChange={(e) => setMqttPort(e.target.value)}
+          />
         </Box>
 
         <Box gap="xsmall">
@@ -170,11 +199,84 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
         </Box>
 
         <Button
+          label={showAdvanced ? "Hide advanced settings" : "Show advanced settings"}
+          onClick={() => setShowAdvanced((v) => !v)}
+          size="small"
+        />
+
+        {showAdvanced && (
+          <Box gap="xsmall" pad="small" round="xsmall" border background="background-contrast">
+            <Text size="small" color="text-weak">
+              Wait time (min) — how long the cat gets to leave before a cycle starts
+            </Text>
+            <TextInput
+              type="number"
+              min={MIN_WAIT_TIMER_MIN}
+              value={waitTimerMin}
+              onChange={(e) => setWaitTimerMin(e.target.value)}
+            />
+            <Text size="xsmall" color="text-weak">
+              Minimum {MIN_WAIT_TIMER_MIN} minutes — enforced by the device
+              regardless of what's entered here.
+            </Text>
+
+            <Text size="small" color="text-weak" margin={{ top: "small" }}>
+              Cat-present warning (min) — flags unusually long occupancy
+            </Text>
+            <TextInput
+              type="number"
+              min={MIN_CAT_WARNING_MIN}
+              value={catPresentWarningMin}
+              onChange={(e) => setCatPresentWarningMin(e.target.value)}
+            />
+            <Text size="xsmall" color="text-weak">
+              Minimum {MIN_CAT_WARNING_MIN} minutes, matching the original
+              stock board — can be set higher, not lower.
+            </Text>
+
+            <Box direction="row" align="center" gap="small" margin={{ top: "small" }}>
+              <CheckBox
+                checked={requireManualReset}
+                onChange={(e) => setRequireManualReset(e.target.checked)}
+                label="Require manual reset after any interruption"
+              />
+            </Box>
+            <Text size="xsmall" color="text-weak">
+              Off (default): only a pinch detection needs manual
+              confirmation to resume — a weight-switch interruption
+              auto-resumes on its own after a 2-minute cooldown. On: matches
+              the original stock board exactly — every interruption needs a
+              button press or dashboard confirmation, nothing auto-resumes.
+            </Text>
+
+            <Text size="small" color="text-weak" margin={{ top: "small" }}>
+              Cycles until drawer full
+            </Text>
+            <TextInput
+              type="number"
+              min={MIN_DRAWER_FULL_CYCLES}
+              value={drawerFullCycles}
+              onChange={(e) => setDrawerFullCycles(e.target.value)}
+            />
+            <Text size="xsmall" color="text-weak">
+              Defaults to 10 — tune it based on your own experience (litter
+              type and how many cats use it both affect how many cycles the
+              drawer actually holds before it needs emptying).
+            </Text>
+          </Box>
+        )}
+
+        <Button
           label={saving ? "Saving…" : "Save & reboot"}
           primary
           onClick={handleSave}
           disabled={saving}
         />
+        {validationError && (
+          <Text size="xsmall" color="state-fault">
+            {validationError}
+          </Text>
+        )}
         {error && (
           <Text size="xsmall" color="state-fault">
             {error}

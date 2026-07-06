@@ -6,6 +6,11 @@ export interface DeviceConfigPayload {
   mqttPort: number;
   mqttUser: string;
   waitTimerMin: number;
+  requireManualReset: boolean;
+  catPresentWarningMin: number;
+  dayStartHour: number;
+  dayEndHour: number;
+  drawerFullCycles: number;
 }
 
 export interface WifiNetwork {
@@ -14,14 +19,23 @@ export interface WifiNetwork {
   secure: boolean;
 }
 
+// Optional throughout: the device's /save handler only overwrites fields
+// present in the request body and leaves everything else as-is, so callers
+// that only care about one setting (e.g. the Analytics page's day/night
+// hours) can post just that without needing the full WiFi/MQTT shape.
 export interface SaveConfigInput {
-  wifiSsid: string;
-  wifiPass: string;
-  mqttHost: string;
-  mqttPort: number;
-  mqttUser: string;
-  mqttPass: string;
-  waitTimerMin: number;
+  wifiSsid?: string;
+  wifiPass?: string;
+  mqttHost?: string;
+  mqttPort?: number;
+  mqttUser?: string;
+  mqttPass?: string;
+  waitTimerMin?: number;
+  requireManualReset?: boolean;
+  catPresentWarningMin?: number;
+  dayStartHour?: number;
+  dayEndHour?: number;
+  drawerFullCycles?: number;
 }
 
 // The config HTTP API lives on the same host as the WS endpoint (ws(s)://host/ws).

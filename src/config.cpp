@@ -13,6 +13,11 @@ void loadConfig(DeviceConfig &cfg) {
   cfg.mqttUser = prefs.getString("mqttUser", "");
   cfg.mqttPass = prefs.getString("mqttPass", "");
   cfg.waitTimerSec = prefs.getUInt("waitTimerSec", 420);
+  cfg.requireManualReset = prefs.getBool("manualReset", false);
+  cfg.catPresentWarningSec = prefs.getUInt("catWarningSec", 120);
+  cfg.dayStartHour = prefs.getUChar("dayStartHour", 6);
+  cfg.dayEndHour = prefs.getUChar("dayEndHour", 20);
+  cfg.drawerFullCycles = prefs.getUInt("drawerFullCyc", 10);
   prefs.end();
 }
 
@@ -26,6 +31,11 @@ void saveConfig(const DeviceConfig &cfg) {
   prefs.putString("mqttUser", cfg.mqttUser);
   prefs.putString("mqttPass", cfg.mqttPass);
   prefs.putUInt("waitTimerSec", cfg.waitTimerSec);
+  prefs.putBool("manualReset", cfg.requireManualReset);
+  prefs.putUInt("catWarningSec", cfg.catPresentWarningSec);
+  prefs.putUChar("dayStartHour", cfg.dayStartHour);
+  prefs.putUChar("dayEndHour", cfg.dayEndHour);
+  prefs.putUInt("drawerFullCyc", cfg.drawerFullCycles);
   prefs.end();
 }
 
