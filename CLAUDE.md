@@ -770,6 +770,15 @@ still says "the sensors failed," it predates this correction and is wrong.
 
 ## Things NOT yet done
 
+- **Custom PCB, sized to match the original controller's physical
+  footprint, so the new board mounts exactly where the old one did** —
+  schematic/layout in progress as of 2026-07-06, not otherwise documented
+  anywhere in this repo before now. The ESP32 mini form factor (see the
+  GPIO13/14 anti-pinch note elsewhere in this file) was chosen specifically
+  because it needs to physically fit that same footprint/enclosure — a
+  full-size DevKit (used for all earlier bench testing) doesn't fit. No
+  further detail (tool, stage, target dimensions) captured yet - ask the
+  user for specifics if this needs picking back up.
 - Cycle count/drawer count persistence, OTA, drawer-full tracking: **done**.
 - WiFi/MQTT/wait-timer runtime config + setup portal: **done**.
 - On-device dashboard hosting: **done**.
