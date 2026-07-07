@@ -46,9 +46,13 @@
 // ---------------------------------------------------------------------------
 // Pin map
 // ---------------------------------------------------------------------------
+// DRV8871 (production motor driver as of 2026-07-07) has no separate
+// enable/PWM pin - IN1/IN2 are PWM'd directly instead, whichever is the
+// active direction. GPIO25 (the old L298N ENA line) is no longer used here;
+// it's still driven from the breadboard/diagnostic tool since that keeps
+// the L298N ENA line alive there and costs nothing on a DRV8871 board.
 static const uint8_t PIN_MOTOR_IN1 = 26;
 static const uint8_t PIN_MOTOR_IN2 = 27;
-static const uint8_t PIN_MOTOR_ENA = 25; // PWM speed
 static const uint8_t PIN_HALL_HOME = 34; // input-only pin, needs external pull-up to 3.3V
 static const uint8_t PIN_HALL_DUMP = 35; // input-only pin, needs external pull-up to 3.3V
 static const uint8_t PIN_WEIGHT_SWITCH = 32; // stock mechanical cat-weight switch
@@ -62,7 +66,8 @@ static const uint8_t PIN_LED_GREEN = 4;
 static const uint8_t PIN_LED_YELLOW = 16;
 static const uint8_t PIN_LED_RED = 17;
 
-static const uint8_t PWM_CHANNEL = 0;
+static const uint8_t PWM_CHANNEL_IN1 = 0;
+static const uint8_t PWM_CHANNEL_IN2 = 1;
 static const uint16_t PWM_FREQ_HZ = 5000;
 static const uint8_t PWM_RESOLUTION_BITS = 8;
 static const uint8_t MOTOR_SPEED = 220; // 0-255, stays below full 255 to soften inrush/noise
@@ -267,15 +272,13 @@ static DebouncedInput manualButton;
 // Motor control
 // ---------------------------------------------------------------------------
 static void motorStop() {
-  digitalWrite(PIN_MOTOR_IN1, LOW);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
-  ledcWrite(PWM_CHANNEL, 0);
+  ledcWrite(PWM_CHANNEL_IN1, 0);
+  ledcWrite(PWM_CHANNEL_IN2, 0);
 }
 
 static void motorRunForward() {
-  digitalWrite(PIN_MOTOR_IN1, HIGH);
-  digitalWrite(PIN_MOTOR_IN2, LOW);
-  ledcWrite(PWM_CHANNEL, MOTOR_SPEED);
+  ledcWrite(PWM_CHANNEL_IN2, 0);
+  ledcWrite(PWM_CHANNEL_IN1, MOTOR_SPEED);
 }
 
 // Home->Dump runs forward; Dump->Home runs reverse - confirmed on real
@@ -284,9 +287,8 @@ static void motorRunForward() {
 // without this fix let the motor keep running forward past the Dump
 // sensor entirely, overshooting the intended stop.
 static void motorRunReverse() {
-  digitalWrite(PIN_MOTOR_IN1, LOW);
-  digitalWrite(PIN_MOTOR_IN2, HIGH);
-  ledcWrite(PWM_CHANNEL, MOTOR_SPEED);
+  ledcWrite(PWM_CHANNEL_IN1, 0);
+  ledcWrite(PWM_CHANNEL_IN2, MOTOR_SPEED);
 }
 
 // ---------------------------------------------------------------------------
@@ -1142,11 +1144,14 @@ static const char *resetReasonName(esp_reset_reason_t reason) {
 void setup() {
   Serial.begin(115200);
 
-  // safe regardless of mode: motor pins driven low before anything else runs
-  pinMode(PIN_MOTOR_IN1, OUTPUT);
-  pinMode(PIN_MOTOR_IN2, OUTPUT);
-  ledcSetup(PWM_CHANNEL, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
-  ledcAttachPin(PIN_MOTOR_ENA, PWM_CHANNEL);
+  // safe regardless of mode: motor pins driven low before anything else runs.
+  // Both IN1/IN2 are PWM-capable (DRV8871: PWM whichever pin is the active
+  // direction, hold the other at 0) rather than one direction pin + a
+  // separate ENA speed pin.
+  ledcSetup(PWM_CHANNEL_IN1, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
+  ledcSetup(PWM_CHANNEL_IN2, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
+  ledcAttachPin(PIN_MOTOR_IN1, PWM_CHANNEL_IN1);
+  ledcAttachPin(PIN_MOTOR_IN2, PWM_CHANNEL_IN2);
   motorStop();
 
   pinMode(PIN_LED_RED, OUTPUT);

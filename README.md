@@ -1,8 +1,8 @@
 # lr2-redux
 
 Replacement control board for a Litter Robot 2 (LR2) whose original control
-board died — built around an ESP32-WROOM mini-form-factor dev board and an
-L298N dual H-bridge motor driver. The stock 12V gearmotor, weight-trigger cat
+board died — built around an ESP32-WROOM mini-form-factor dev board and a
+DRV8871 H-bridge motor driver. The stock 12V gearmotor, weight-trigger cat
 switch, anti-pinch switch, and Home/Dump hall-effect position sensors were
 all still good; this project reuses every one of them as-is, wired into the
 new board instead of the dead one.
@@ -15,7 +15,7 @@ manual "cycle now" command over WiFi.
 | Part | Notes |
 |---|---|
 | ESP32-WROOM mini-form-factor dev board | already have — GPIO breakout varies by specific mini board (this project's board doesn't expose GPIO13; anti-pinch uses GPIO14 instead — double-check your own board's silkscreen before wiring, don't assume the same pins are broken out) |
-| L298N dual H-bridge module | already have; drives the single stock 12V gearmotor |
+| DRV8871 H-bridge breakout | production motor driver as of 2026-07-07; drives the single stock 12V gearmotor. No separate enable/PWM pin — IN1/IN2 are PWM'd directly (see "Motor driver notes" below). The breadboard/diagnostic setup (`env:diagnostic`, see `CLAUDE.md`) still uses an L298N and its ENA line |
 | Stock hall-effect sensors (identified as Allegro A1101EUA-T by opening the package — A3144/US5881 are generic substitutes if one ever needs replacing) | **Reused as-is** — these were never the failed part; the original control board was. Home + Dump position sensing, same stock magnets on the globe |
 | 2x 10kΩ resistor | pull-ups for the hall sensor outputs (pulled to 3.3V, see wiring notes) |
 | 12V → 5V buck converter module (LM2596 or similar, 1A+) | clean logic supply for ESP32 + hall sensors, isolated from motor switching noise |
@@ -30,9 +30,8 @@ manual "cycle now" command over WiFi.
 
 | ESP32 pin | Function | Notes |
 |---|---|---|
-| GPIO26 | Motor IN1 | L298N direction |
-| GPIO27 | Motor IN2 | L298N direction |
-| GPIO25 | Motor ENA | PWM speed (ledc channel 0, 5kHz) |
+| GPIO26 | Motor IN1 | DRV8871 direction/PWM — forward speed (ledc channel 0, 5kHz) |
+| GPIO27 | Motor IN2 | DRV8871 direction/PWM — reverse speed (ledc channel 1, 5kHz) |
 | GPIO34 | Hall - Home | input-only pin, needs the external 10k pull-up (no internal pull-up available) |
 | GPIO35 | Hall - Dump | input-only pin, needs the external 10k pull-up (no internal pull-up available) |
 | GPIO32 | Weight/cat switch | active-low, internal pull-up used |
@@ -41,8 +40,8 @@ manual "cycle now" command over WiFi.
 | GPIO4 | Status LED — green | see "Status LED" below |
 | GPIO16 | Status LED — yellow | see "Status LED" below |
 | GPIO17 | Status LED — red | see "Status LED" below |
-| 5V (from buck) | ESP32 VIN, hall sensor VCC, L298N logic supply | do **not** power ESP32 from the L298N's onboard 5V regulator directly off the 12V rail — motor switching noise rides straight into it |
-| GND | common ground | tie ESP32 GND, L298N GND, buck converter GND, and 12V supply GND all together |
+| 5V (from buck) | ESP32 VIN, hall sensor VCC, DRV8871 logic supply | do **not** power the ESP32 straight off the 12V rail — motor switching noise rides right into it, use the isolated buck 5V |
+| GND | common ground | tie ESP32 GND, DRV8871 GND, buck converter GND, and 12V supply GND all together |
 
 ### Status LED
 
@@ -115,11 +114,26 @@ the GPIO stays within the ESP32's 3.3V-max input range.
 
 ## Motor driver notes
 
+- **Production boards use a DRV8871 as of 2026-07-07** (switched from an
+  L298N). The DRV8871 has no separate enable/PWM pin — speed control is done
+  by PWMing whichever of IN1/IN2 is the active direction and holding the
+  other at 0, rather than a static-HIGH direction pin plus a separate PWM'd
+  ENA line. `motorStop()`/`motorRunForward()`/`motorRunReverse()` in
+  `main.cpp` PWM IN1 (ledc channel 0) and IN2 (ledc channel 1) directly.
+  `MOTOR_SPEED` (220/255) still applies, just on IN1/IN2 instead of ENA.
+- The breadboard/diagnostic setup (`env:diagnostic`, `diagnostic_main.cpp`)
+  still uses an L298N with its ENA line PWM'd on GPIO25 — kept as-is since
+  driving that line costs nothing and there was no reason to touch a
+  breadboard tool that already works. Don't read GPIO25/ENA references in
+  `diagnostic_main.cpp` as still applying to `main.cpp`/production.
 - L298N has ~2V forward drop per channel; it'll run warm under sustained load.
   The stock LR2 gearmotor draws well under its 2A/channel rating, so this is a
   non-issue for the short duty cycles here, but give the module some airflow.
+  (Applies to the breadboard L298N only, not production DRV8871 boards.)
 - Most L298N breakout boards already include the four flyback diodes needed for
-  a DC motor — verify yours does before assuming you're covered.
+  a DC motor — verify yours does before assuming you're covered. The DRV8871
+  has integrated flyback protection, so this is a non-issue on production
+  boards.
 - **Both motor directions are used** — `motorRunForward()` drives Home→Dump,
   `motorRunReverse()` drives Dump→Home. This was corrected 2026-07-05 after
   real hardware testing showed the globe does **not** continue forward past
