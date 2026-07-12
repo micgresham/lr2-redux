@@ -26,6 +26,11 @@ manual "cycle now" command over WiFi.
 | Stock manual cycle button (optional) | reused if present/working |
 | 3x LED (green/yellow/red) + 3x current-limit resistor (~330Ω) | replicates the original stock board's status language exactly — see "Status LED" below |
 
+A custom PCB sized to the original controller's footprint is in progress
+(EasyEDA). Its schematic/netlist (board "PCB1") implements this exact BOM
+and pinout and was checked against the pinout table below as of
+2026-07-11; physical layout/routing and fabrication are still open.
+
 ## Pinout
 
 | ESP32 pin | Function | Notes |
