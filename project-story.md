@@ -1,8 +1,8 @@
 # Rebuilding a dead Litter-Robot 2 control board
 
-**Doc:** LR2-Redux / Revision Notes · **Rev.** 1.3 · **Subject board:** LITTER-ROBOT Rev.2C (2003, Intensa Inc.) · **Status:** bench-verified, assembly in progress · **Repo:** [github.com/micgresham/lr2-redux](https://github.com/micgresham/lr2-redux)
+**Doc:** LR2-Redux / Revision Notes · **Rev.** 2.0 · **Subject board:** LITTER-ROBOT Rev.2C (2003, Intensa Inc.) · **Status:** Complete — running in the real unit · **Repo:** [github.com/micgresham/lr2-redux](https://github.com/micgresham/lr2-redux)
 
-The original control board died — not the sensors, not the switches, not the motor. Instead of hunting for a 20-year-old replacement for a dead PIC microcontroller, this project replaces the whole control board with an ESP32 and reuses every other stock part exactly as it was: the gearmotor, the hall sensors, the weight switch, the anti-pinch switch, the wiring harness itself. This page is the story of how that went, in the order it actually happened — including the parts that didn't work the first time. Full source is on GitHub at [micgresham/lr2-redux](https://github.com/micgresham/lr2-redux).
+The original control board died — not the sensors, not the switches, not the motor. Instead of hunting for a 20-year-old replacement for a dead PIC microcontroller, this project replaces the whole control board with an ESP32 and reuses every other stock part exactly as it was: the gearmotor, the hall sensors, the weight switch, the anti-pinch switch, the wiring harness itself. This page is the story of how that went, in the order it actually happened — including the parts that didn't work the first time. As of this revision, the custom PCB is built, installed, and running the real robot end to end. Full source is on GitHub at [micgresham/lr2-redux](https://github.com/micgresham/lr2-redux).
 
 | | |
 |---|---|
@@ -11,8 +11,10 @@ The original control board died — not the sensors, not the switches, not the m
 | Weight / anti-pinch split | **Done, bench-verified** |
 | Motor driver | **DRV8871, hardware-verified** |
 | Firmware | **Builds clean, both targets** |
-| Custom PCB | Schematic/layout in progress |
-| Real-hardware cycle timing | Placeholder values |
+| Custom PCB | **Fabricated, installed — working** |
+| Real-hardware cycle timing | **Confirmed working (placeholders kept as-is)** |
+| WiFi `ASSOC_LEAVE` ghost (§09) | **Resolved — hasn't recurred since PCB install** |
+| **Project** | **Complete** |
 
 ## Contents
 
@@ -87,7 +89,7 @@ None of this needed to be exotic. The plan was always to keep the gearmotor, the
 
 **Switched from an L298N to a DRV8871, 2026-07-07.** The L298N was the original choice — already on hand, and it drove the gearmotor without any trouble on the bench. The DRV8871 replaced it on production boards specifically because it needs no separate enable/PWM pin, simplifying the eventual custom PCB's routing by one GPIO; firmware now PWMs whichever of IN1/IN2 is the active direction directly, reproducing the same softened speed the old ENA line gave. The breadboard/diagnostic bring-up setup still uses the L298N, on purpose — no reason to touch a working bench tool. Installed on the real unit and confirmed working the same day.
 
-The one piece of this still moving: a custom PCB, sized to match the original controller's physical footprint, so the new board mounts exactly where the old one did instead of sitting somewhere else on loose wires. Schematic and layout are in progress now — worth its own update once it's actually built and installed, rather than described here ahead of it.
+That custom PCB — sized to match the original controller's physical footprint, so the new board mounts exactly where the old one did instead of sitting somewhere else on loose wires — came back from fabrication looking great: clean routing, correct footprint, no post-fab rework needed. See §10 for how it performed once installed in the actual unit.
 
 ## 06 · Bring-up, and the harness split
 
@@ -137,15 +139,17 @@ Rather than guess at a fourth explanation, it seemed better to add logging inste
 >
 > mDNS (`lr2redux.local`) turned out to initialize exactly once, ever — the first successful connect after boot — and never re-arm itself after a reconnect. Direct-IP access kept working the whole time, which is what made it look "sporadic" rather than broken: two features that don't share any state, one silently going stale while the other kept working.
 
-The root cause of the original `ASSOC_LEAVE` loop is still unknown. This section gets rewritten the day there's an actual answer.
+The root cause was never pinned down to a single confirmed mechanism — but the issue has not recurred since the custom PCB (§05) replaced the breadboard wiring. Whatever combination of cleaner grounding, decoupling, or simply eliminating loose bench jumpers was responsible, `ASSOC_LEAVE` hasn't shown up again. This section, once a standing mystery, is now closed.
 
 ## 10 · Where it stands
 
-Both firmware images (production and the standalone diagnostic tool) build clean, and the web dashboard builds and typechecks clean. The 7-pin harness connector is fully resolved and, as of the hall-sensor install, fully wired through the original connector rather than bench leads — nothing on it is provisional anymore. The weight/anti-pinch physical split is done and bench-verified. The production motor driver switched from an L298N to a DRV8871 (§05) and has been installed and confirmed working on the real unit.
+The custom PCB (§05) came back from fabrication looking great — clean routing, correct footprint, dropped straight into the original enclosure where the dead board used to sit. It's now installed in the actual Litter-Robot 2, wired to every stock part this project set out to reuse: the gearmotor, both hall sensors, the weight switch, the anti-pinch switch, the manual button, all three status LEDs.
 
-What's still ahead: the custom PCB (schematic/layout in progress — see §05), finishing the physical assembly once it's built, and being honest that a lot of this firmware builds clean but hasn't been proven on a complete, assembled unit yet — the cycle-phase timing constants (dwell, shake, overshoot durations) are best guesses for now, not measurements. Someone still needs to stand there with a stopwatch.
+Every piece of it works. Homing finds Dump and then Home correctly on boot. A normal cycle runs the full sequence — forward to Dump, pause, shake, reverse to Home, overshoot, settle — with none of the motor-direction or timing bugs found earlier in testing (§07) surviving into real use. The weight switch and anti-pinch switch behave as two fully independent signals, exactly as the hardware split (§06) was meant to guarantee. The dashboard, MQTT/Home Assistant integration, and OTA updates all work over WiFi that, notably, has stayed connected — the `ASSOC_LEAVE` ghost from §09 hasn't reappeared since this board replaced the breadboard wiring.
 
-The rest of the story — the PCB coming back, final assembly, first full unattended cycle, the timing constants getting tuned for real — isn't written yet.
+The cycle-phase timing constants (dump pause, shake, home overshoot, segment timeouts) were never re-measured with a stopwatch — they're the same placeholder values guessed early in the project. They didn't need to change: the placeholders turned out to be good enough, and the real unit cycles correctly with them left exactly as they were.
+
+**The project is complete.** A Litter-Robot 2 whose original 2003 control board had died is now running on a custom ESP32-based replacement, reusing every stock mechanical and sensing part exactly as it was, with a working dashboard, Home Assistant integration, and OTA update path — installed, wired, and cycling on its own in the real unit.
 
 ---
 
