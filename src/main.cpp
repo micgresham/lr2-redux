@@ -36,6 +36,8 @@
 #include "config.h"
 #include "config_api.h"
 #include "setup_portal.h"
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -488,6 +490,11 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 enum class WifiConnectPhase { IDLE, SCANNING };
 static WifiConnectPhase wifiConnectPhase = WifiConnectPhase::IDLE;
 
+// This macro forces the linker to execute this function during the initial boot loader phase
+void __attribute__((constructor)) pre_init_disable_brownout() {
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); 
+}
+
 static void connectWifiIfNeeded() {
   static unsigned long lastAttempt = 0;
   static unsigned long attemptCount = 0;
@@ -536,6 +543,11 @@ static void connectWifiIfNeeded() {
   if (millis() - lastAttempt < WIFI_RECONNECT_INTERVAL_MS) return;
   lastAttempt = millis();
   WiFi.mode(WIFI_STA);
+
+  // Cap the transmission power (Options: 19.5, 17, 15, 13, 11, 8.5, 7, 5, 2)
+  // 15dBm or 13dBm drastically cuts current spikes while keeping decent range
+  WiFi.setTxPower(WIFI_POWER_13dBm); 
+  
   WiFi.scanNetworks(true /* async */);
   wifiConnectPhase = WifiConnectPhase::SCANNING;
 }
@@ -1221,6 +1233,10 @@ void setup() {
   // actual WiFi.begin() call and reconnect logic; this just brings the
   // interface up first so AsyncTCP has something to attach to.
   WiFi.mode(WIFI_STA);
+
+  // Cap the transmission power (Options: 19.5, 17, 15, 13, 11, 8.5, 7, 5, 2)
+  // 15dBm or 13dBm drastically cuts current spikes while keeping decent range
+  WiFi.setTxPower(WIFI_POWER_13dBm); 
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);

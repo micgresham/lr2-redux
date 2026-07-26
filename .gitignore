@@ -8,3 +8,4 @@ CLAUDE.md
 web/node_modules/
 web/dist/
 web/.env.local
+package-lock.json

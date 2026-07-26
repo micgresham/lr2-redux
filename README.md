@@ -15,7 +15,7 @@ manual "cycle now" command over WiFi.
 | Part | Notes |
 |---|---|
 | ESP32-WROOM mini-form-factor dev board | already have — GPIO breakout varies by specific mini board (this project's board doesn't expose GPIO13; anti-pinch uses GPIO14 instead — double-check your own board's silkscreen before wiring, don't assume the same pins are broken out) |
-| DRV8871 H-bridge breakout | production motor driver as of 2026-07-07; drives the single stock 12V gearmotor. No separate enable/PWM pin — IN1/IN2 are PWM'd directly (see "Motor driver notes" below). The breadboard/diagnostic setup (`env:diagnostic`, see `CLAUDE.md`) still uses an L298N and its ENA line |
+| DRV8871 H-bridge breakout | production motor driver as of 2026-07-07; drives the single stock 12V gearmotor. No separate enable/PWM pin — IN1/IN2 are PWM'd directly (see "Motor driver notes" below). The breadboard/diagnostic setup (`env:diagnostic`) still uses an L298N and its ENA line |
 | Stock hall-effect sensors (identified as Allegro A1101EUA-T by opening the package — A3144/US5881 are generic substitutes if one ever needs replacing) | **Reused as-is** — these were never the failed part; the original control board was. Home + Dump position sensing, same stock magnets on the globe |
 | 2x 10kΩ resistor | pull-ups for the hall sensor outputs (pulled to 3.3V, see wiring notes) |
 | 12V → 5V buck converter module (LM2596 or similar, 1A+) | clean logic supply for ESP32 + hall sensors, isolated from motor switching noise |
@@ -65,8 +65,8 @@ original stock board's status language exactly, straight from its manual:
 
 These are two separate physical switches, but the **stock harness wires them
 in series on one shared 2-wire loop** (confirmed both by direct continuity
-trace on this unit and independently by another Litter-Robot teardown/rebuild
-— see `CLAUDE.md`, "Pins 6/7 topology"). Read as a single combined signal,
+trace on this unit and independently by another Litter-Robot teardown/rebuild).
+Read as a single combined signal,
 they're indistinguishable: "cat present" and "pinch detected" produce the
 same reading, and — worse — a pinch that happens while the cat has already
 left (i.e., during an actual cycle, exactly when it matters) produces **no
@@ -144,7 +144,7 @@ the GPIO stays within the ESP32's 3.3V-max input range.
   real hardware testing showed the globe does **not** continue forward past
   Dump all the way back around to Home (an earlier assumption, never
   validated before build-testing existed) — it needs to stop at Dump and
-  reverse. See `CLAUDE.md`, "Key decisions" for the full story.
+  reverse.
 
 ## Firmware
 
@@ -274,8 +274,8 @@ BOOT_HOMING → IDLE ⇄ CAT_PRESENT → WAIT_TIMER → CYCLE_TO_DUMP → CYCLE_
   actually ends the cycle. This helps litter that piled up to one side
   during the dump level back out. Placeholder duration, same caveat.
 - Each sensor-wait phase (`CYCLE_TO_DUMP`, `CYCLE_TO_HOME`, `CYCLE_HOME_SETTLE`)
-  has a 180s timeout (placeholder, pending a real timed measurement — see
-  `CLAUDE.md`); exceeding it stops the motor and enters `FAULT`. The
+  has a 180s timeout (placeholder, pending a real timed measurement);
+  exceeding it stops the motor and enters `FAULT`. The
   time-bounded phases (`CYCLE_DUMP_PAUSE`, `CYCLE_DUMP_SHAKE`,
   `CYCLE_HOME_OVERSHOOT`) don't need this — they always advance after their
   own fixed duration.
