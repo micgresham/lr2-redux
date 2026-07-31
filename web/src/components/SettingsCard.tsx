@@ -5,9 +5,15 @@ import { useDeviceConfigApi } from "../hooks/useDeviceConfigApi";
 const MIN_WAIT_TIMER_MIN = 2;
 const MIN_CAT_WARNING_MIN = 2;
 const MIN_DRAWER_FULL_CYCLES = 1;
+const MIN_HOME_OVERSHOOT_MS = 0;
+const MAX_HOME_OVERSHOOT_MS = 15000;
+const MIN_SHAKE_STEP_MS = 50;
+const MAX_SHAKE_STEP_MS = 5000;
+const MIN_SHAKE_COUNT = 0;
+const MAX_SHAKE_COUNT = 20;
 
 export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
-  const { config, networks, scanning, saving, error, fetchConfig, scan, save } =
+  const { config, networks, scanning, saving, reconnecting, error, fetchConfig, scan, save } =
     useDeviceConfigApi(deviceUrl);
 
   const [wifiSsid, setWifiSsid] = useState("");
@@ -20,6 +26,9 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
   const [requireManualReset, setRequireManualReset] = useState(false);
   const [catPresentWarningMin, setCatPresentWarningMin] = useState("2");
   const [drawerFullCycles, setDrawerFullCycles] = useState("10");
+  const [homeOvershootMs, setHomeOvershootMs] = useState("3000");
+  const [dumpShakeStepMs, setDumpShakeStepMs] = useState("400");
+  const [dumpShakeCount, setDumpShakeCount] = useState("3");
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
@@ -38,6 +47,9 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
     setRequireManualReset(config.requireManualReset ?? false);
     setCatPresentWarningMin(String(config.catPresentWarningMin ?? 2));
     setDrawerFullCycles(String(config.drawerFullCycles ?? 10));
+    setHomeOvershootMs(String(config.homeOvershootMs ?? 3000));
+    setDumpShakeStepMs(String(config.dumpShakeStepMs ?? 400));
+    setDumpShakeCount(String(config.dumpShakeCount ?? 3));
   }, [config]);
 
   const handleSave = async () => {
@@ -68,24 +80,56 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
       return;
     }
 
+    const homeOvershootValue = parseInt(homeOvershootMs, 10) || 0;
+    if (homeOvershootValue < MIN_HOME_OVERSHOOT_MS || homeOvershootValue > MAX_HOME_OVERSHOOT_MS) {
+      setValidationError(
+        `Home overshoot must be between ${MIN_HOME_OVERSHOOT_MS} and ${MAX_HOME_OVERSHOOT_MS} ms.`,
+      );
+      return;
+    }
+
+    const dumpShakeStepValue = parseInt(dumpShakeStepMs, 10) || 0;
+    if (dumpShakeStepValue < MIN_SHAKE_STEP_MS || dumpShakeStepValue > MAX_SHAKE_STEP_MS) {
+      setValidationError(
+        `Shake swing duration must be between ${MIN_SHAKE_STEP_MS} and ${MAX_SHAKE_STEP_MS} ms.`,
+      );
+      return;
+    }
+
+    const dumpShakeCountValue = parseInt(dumpShakeCount, 10) || 0;
+    if (dumpShakeCountValue < MIN_SHAKE_COUNT || dumpShakeCountValue > MAX_SHAKE_COUNT) {
+      setValidationError(
+        `Number of shakes must be between ${MIN_SHAKE_COUNT} and ${MAX_SHAKE_COUNT}.`,
+      );
+      return;
+    }
+
     const changingWifi = config !== null && wifiSsid !== config.wifiSsid;
-    const ok = await save({
-      wifiSsid,
-      wifiPass,
-      mqttHost,
-      mqttPort: parseInt(mqttPort, 10) || 1883,
-      mqttUser,
-      mqttPass,
-      waitTimerMin: waitTimerValue,
-      requireManualReset,
-      catPresentWarningMin: catWarningValue,
-      drawerFullCycles: drawerFullValue,
-    });
+    const ok = await save(
+      {
+        wifiSsid,
+        wifiPass,
+        mqttHost,
+        mqttPort: parseInt(mqttPort, 10) || 1883,
+        mqttUser,
+        mqttPass,
+        waitTimerMin: waitTimerValue,
+        requireManualReset,
+        catPresentWarningMin: catWarningValue,
+        drawerFullCycles: drawerFullValue,
+        homeOvershootMs: homeOvershootValue,
+        dumpShakeStepMs: dumpShakeStepValue,
+        dumpShakeCount: dumpShakeCountValue,
+      },
+      // Changing the SSID reboots the device onto a different network -
+      // polling this same URL afterward would never succeed.
+      { skipReconnectPoll: changingWifi },
+    );
     if (ok) {
       setSavedMsg(
         changingWifi
           ? "Saved. Rebooting onto the new network — reconnect the dashboard there."
-          : "Saved. The board is rebooting.",
+          : "Saved and reconnected.",
       );
     }
   };
@@ -263,14 +307,66 @@ export function SettingsCard({ deviceUrl }: { deviceUrl: string }) {
               type and how many cats use it both affect how many cycles the
               drawer actually holds before it needs emptying).
             </Text>
+
+            <Text size="small" color="text-weak" margin={{ top: "small" }}>
+              Home overshoot (ms) — how far past Home it reverses before
+              coming back to settle, to help level litter
+            </Text>
+            <TextInput
+              type="number"
+              min={MIN_HOME_OVERSHOOT_MS}
+              max={MAX_HOME_OVERSHOOT_MS}
+              value={homeOvershootMs}
+              onChange={(e) => setHomeOvershootMs(e.target.value)}
+            />
+            <Text size="xsmall" color="text-weak">
+              There's no rotation sensor for this, so distance is
+              approximated by time at a fixed motor speed — more ms means
+              more rotation. Defaults to 3000ms. Increase for litter that
+              needs more spreading, decrease if it's dragging the globe too
+              far. Range {MIN_HOME_OVERSHOOT_MS}–{MAX_HOME_OVERSHOOT_MS}ms.
+            </Text>
+
+            <Text size="small" color="text-weak" margin={{ top: "small" }}>
+              Shake swing duration (ms) — how long each back-and-forth swing
+              lasts when dislodging stuck clumps at the dump position
+            </Text>
+            <TextInput
+              type="number"
+              min={MIN_SHAKE_STEP_MS}
+              max={MAX_SHAKE_STEP_MS}
+              value={dumpShakeStepMs}
+              onChange={(e) => setDumpShakeStepMs(e.target.value)}
+            />
+            <Text size="xsmall" color="text-weak">
+              Same time-as-distance caveat as home overshoot — a longer
+              swing rotates further at the same motor speed. Defaults to
+              400ms. Range {MIN_SHAKE_STEP_MS}–{MAX_SHAKE_STEP_MS}ms.
+            </Text>
+
+            <Text size="small" color="text-weak" margin={{ top: "small" }}>
+              Number of shakes
+            </Text>
+            <TextInput
+              type="number"
+              min={MIN_SHAKE_COUNT}
+              max={MAX_SHAKE_COUNT}
+              value={dumpShakeCount}
+              onChange={(e) => setDumpShakeCount(e.target.value)}
+            />
+            <Text size="xsmall" color="text-weak">
+              How many full back-and-forth swings to do. Defaults to 3; set
+              to 0 to skip the shake entirely. Range {MIN_SHAKE_COUNT}–
+              {MAX_SHAKE_COUNT}.
+            </Text>
           </Box>
         )}
 
         <Button
-          label={saving ? "Saving…" : "Save & reboot"}
+          label={saving ? "Saving…" : reconnecting ? "Reconnecting…" : "Save & reboot"}
           primary
           onClick={handleSave}
-          disabled={saving}
+          disabled={saving || reconnecting}
         />
         {validationError && (
           <Text size="xsmall" color="state-fault">

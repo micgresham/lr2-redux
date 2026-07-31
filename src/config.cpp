@@ -18,6 +18,9 @@ void loadConfig(DeviceConfig &cfg) {
   cfg.dayStartHour = prefs.getUChar("dayStartHour", 6);
   cfg.dayEndHour = prefs.getUChar("dayEndHour", 20);
   cfg.drawerFullCycles = prefs.getUInt("drawerFullCyc", 10);
+  cfg.homeOvershootMs = prefs.getUInt("overshootMs", 3000);
+  cfg.dumpShakeStepMs = prefs.getUInt("shakeStepMs", 400);
+  cfg.dumpShakeCount = prefs.getUInt("shakeCount", 3);
   prefs.end();
 }
 
@@ -36,6 +39,9 @@ void saveConfig(const DeviceConfig &cfg) {
   prefs.putUChar("dayStartHour", cfg.dayStartHour);
   prefs.putUChar("dayEndHour", cfg.dayEndHour);
   prefs.putUInt("drawerFullCyc", cfg.drawerFullCycles);
+  prefs.putUInt("overshootMs", cfg.homeOvershootMs);
+  prefs.putUInt("shakeStepMs", cfg.dumpShakeStepMs);
+  prefs.putUInt("shakeCount", cfg.dumpShakeCount);
   prefs.end();
 }
 

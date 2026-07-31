@@ -33,6 +33,7 @@ export interface Lr2Telemetry {
   catPresentWarning: boolean | null;
   ipAddress: string | null;
   rssi: number | null;
+  firmwareBuild: string | null;
   sendCommand: (cmd: Lr2Command) => void;
 }
 
@@ -48,6 +49,7 @@ interface Lr2StatePayload {
   catPresentWarning: boolean;
   ipAddress: string;
   rssi: number;
+  firmwareBuild: string;
 }
 
 const RECONNECT_DELAY_MS = 3000;
@@ -138,6 +140,7 @@ export function useLr2Socket(deviceUrl: string | null): Lr2Telemetry {
     catPresentWarning: payload.catPresentWarning ?? null,
     ipAddress: payload.ipAddress || null,
     rssi: connectionStatus === "connected" ? payload.rssi ?? null : null,
+    firmwareBuild: payload.firmwareBuild || null,
     sendCommand,
   };
 }

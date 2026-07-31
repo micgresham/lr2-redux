@@ -65,13 +65,6 @@ export function FirmwareUpdateCard({ deviceUrl }: { deviceUrl: string }) {
         <Text weight="bold">Firmware update</Text>
       </CardHeader>
       <CardBody pad={{ horizontal: "medium", bottom: "medium" }} gap="small">
-        <Text size="small" color="text-weak">
-          Upload a <code>.bin</code> built with <code>pio run -e esp32dev</code>{" "}
-          — flashes over WiFi, same as{" "}
-          <code>pio run -t upload --upload-port lr2redux.local</code>, but
-          from the browser. The board stops the motor first and reboots onto
-          the new firmware once the upload completes.
-        </Text>
         <FileInput
           name="firmware"
           onChange={(_event, { files }) => setFile(files?.[0] ?? null)}

@@ -53,6 +53,9 @@ void registerConfigApiRoutes(AsyncWebServer &server, DeviceConfig &cfg) {
     doc["dayStartHour"] = cfg.dayStartHour;
     doc["dayEndHour"] = cfg.dayEndHour;
     doc["drawerFullCycles"] = cfg.drawerFullCycles;
+    doc["homeOvershootMs"] = cfg.homeOvershootMs;
+    doc["dumpShakeStepMs"] = cfg.dumpShakeStepMs;
+    doc["dumpShakeCount"] = cfg.dumpShakeCount;
     String out;
     serializeJson(doc, out);
     request->send(200, "application/json", out);
@@ -72,7 +75,7 @@ void registerConfigApiRoutes(AsyncWebServer &server, DeviceConfig &cfg) {
           // globe before it cycles, not just clear the weight switch briefly
           // mid-shuffle. The web UI also enforces this, but the firmware is
           // the authoritative check since /save can be hit directly.
-          if (minutes >= 2) cfg.waitTimerSec = (uint32_t)minutes * 60UL;
+          if (minutes >= CFG_MIN_WAIT_TIMER_MIN) cfg.waitTimerSec = (uint32_t)minutes * 60UL;
         }
         if (obj["requireManualReset"].is<bool>()) {
           cfg.requireManualReset = obj["requireManualReset"].as<bool>();
@@ -82,7 +85,7 @@ void registerConfigApiRoutes(AsyncWebServer &server, DeviceConfig &cfg) {
           // Enforced minimum matches the original board's documented
           // threshold - can be set higher (a more patient/tolerant
           // threshold), not lower.
-          if (minutes >= 2) cfg.catPresentWarningSec = (uint32_t)minutes * 60UL;
+          if (minutes >= CFG_MIN_CAT_WARNING_MIN) cfg.catPresentWarningSec = (uint32_t)minutes * 60UL;
         }
         if (obj["dayStartHour"].is<int>()) {
           int h = obj["dayStartHour"].as<int>();
@@ -96,7 +99,27 @@ void registerConfigApiRoutes(AsyncWebServer &server, DeviceConfig &cfg) {
           int cycles = obj["drawerFullCycles"].as<int>();
           // Enforced minimum of 1 - a threshold of 0 would mean "always
           // full," which isn't a meaningful setting.
-          if (cycles >= 1) cfg.drawerFullCycles = (uint32_t)cycles;
+          if (cycles >= CFG_MIN_DRAWER_FULL_CYCLES) cfg.drawerFullCycles = (uint32_t)cycles;
+        }
+        if (obj["homeOvershootMs"].is<int>()) {
+          int ms = obj["homeOvershootMs"].as<int>();
+          // 0 is a valid, meaningful value (no overshoot at all); capped at
+          // 15s as a sanity bound against an accidental typo driving the
+          // motor for an unreasonably long time past Home.
+          if (ms >= CFG_MIN_HOME_OVERSHOOT_MS && ms <= CFG_MAX_HOME_OVERSHOOT_MS) cfg.homeOvershootMs = (uint32_t)ms;
+        }
+        if (obj["dumpShakeStepMs"].is<int>()) {
+          int ms = obj["dumpShakeStepMs"].as<int>();
+          // Enforced minimum of 50ms - shorter risks rapid direction
+          // reversals that are hard on the motor/driver with no real
+          // dislodging benefit; capped at 5s as a sanity bound.
+          if (ms >= CFG_MIN_SHAKE_STEP_MS && ms <= CFG_MAX_SHAKE_STEP_MS) cfg.dumpShakeStepMs = (uint32_t)ms;
+        }
+        if (obj["dumpShakeCount"].is<int>()) {
+          int count = obj["dumpShakeCount"].as<int>();
+          // 0 is a valid, meaningful value (skip the shake phase entirely);
+          // capped at 20 as a sanity bound.
+          if (count >= CFG_MIN_SHAKE_COUNT && count <= CFG_MAX_SHAKE_COUNT) cfg.dumpShakeCount = (uint32_t)count;
         }
         // blank password fields mean "leave unchanged", not "clear it"
         if (obj["wifiPass"].is<const char *>() && strlen(obj["wifiPass"]) > 0) {

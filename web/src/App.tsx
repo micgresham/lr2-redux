@@ -60,6 +60,14 @@ function rssiColor(rssi: number): string | undefined {
   return rssi < -75 ? "state-fault" : undefined;
 }
 
+function formatUptime(totalSeconds: number): string {
+  const days = Math.floor(totalSeconds / 86400);
+  const hours = Math.floor((totalSeconds % 86400) / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  return `${days}d ${hours}h ${minutes}m ${seconds}s`;
+}
+
 export default function App() {
   const [deviceUrl, setDeviceUrl] = useState<string>(loadDeviceUrl);
   const [now, setNow] = useState(() => Date.now());
@@ -80,6 +88,7 @@ export default function App() {
     catPresentWarning,
     ipAddress,
     rssi,
+    firmwareBuild,
     sendCommand,
   } = telemetry;
 
@@ -170,9 +179,7 @@ export default function App() {
                   Uptime
                 </Text>
                 <Text weight="bold">
-                  {uptimeSeconds === null
-                    ? "—"
-                    : `${Math.floor(uptimeSeconds / 60)}m ${uptimeSeconds % 60}s`}
+                  {uptimeSeconds === null ? "—" : formatUptime(uptimeSeconds)}
                 </Text>
               </Box>
               <Box direction="row" justify="between">
@@ -188,6 +195,12 @@ export default function App() {
                 <Text weight="bold" color={rssi !== null ? rssiColor(rssi) : undefined}>
                   {rssi === null ? "—" : `${rssi} dBm (${rssiLabel(rssi)})`}
                 </Text>
+              </Box>
+              <Box direction="row" justify="between">
+                <Text color="text-weak" size="small">
+                  Firmware
+                </Text>
+                <Text weight="bold">{firmwareBuild ?? "—"}</Text>
               </Box>
             </CardBody>
           </Card>

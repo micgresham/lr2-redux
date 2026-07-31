@@ -263,16 +263,23 @@ BOOT_HOMING → IDLE ⇄ CAT_PRESENT → WAIT_TIMER → CYCLE_TO_DUMP → CYCLE_
   (`SettingsCard.tsx`), with a **hard-enforced 2-minute minimum** — both
   client-side and, authoritatively, in `config_api.cpp` — so it can't be set
   low enough to risk cycling while the cat is still in or near the globe.
-- At Dump, the motor stops and **dwells 5s** (`CYCLE_DUMP_PAUSE`) so waste
-  finishes falling through, then **shakes** briefly — oscillating direction
-  every 400ms for ~2.4s (`CYCLE_DUMP_SHAKE`) — to dislodge anything stuck,
-  before reversing toward Home. Both durations are placeholders pending
-  real-hardware tuning.
-- At Home, the motor doesn't stop immediately — it **overshoots** a few
-  seconds past Home in reverse (`CYCLE_HOME_OVERSHOOT`), then runs forward
-  again to **settle** back at Home (`CYCLE_HOME_SETTLE`), which is what
-  actually ends the cycle. This helps litter that piled up to one side
-  during the dump level back out. Placeholder duration, same caveat.
+- At Dump, the motor stops and **dwells 5s** (`CYCLE_DUMP_PAUSE`, fixed) so
+  waste finishes falling through, then **shakes** briefly — oscillating
+  direction every `dumpShakeStepMs` (default 400ms) for `dumpShakeCount`
+  total back-and-forth swings (default 3) — to dislodge anything stuck,
+  before reversing toward Home. Both are runtime-configurable under the
+  dashboard's Advanced Settings or the equivalent MQTT `number` entities
+  (see [MQTT topics](#mqtt-topics)) — there's no rotary encoder, so "how
+  far" is only controllable as time at the motor's fixed speed, not a true
+  angle. `dumpShakeCount: 0` skips the shake phase entirely. Defaults match
+  the original hardcoded placeholders, still pending real-hardware tuning.
+- At Home, the motor doesn't stop immediately — it **overshoots** for
+  `homeOvershootMs` (default 3000ms) past Home in reverse
+  (`CYCLE_HOME_OVERSHOOT`), then runs forward again to **settle** back at
+  Home (`CYCLE_HOME_SETTLE`), which is what actually ends the cycle. This
+  helps litter that piled up to one side during the dump level back out.
+  Same runtime-configurable/time-as-distance caveat as the shake settings
+  above.
 - Each sensor-wait phase (`CYCLE_TO_DUMP`, `CYCLE_TO_HOME`, `CYCLE_HOME_SETTLE`)
   has a 180s timeout (placeholder, pending a real timed measurement);
   exceeding it stops the motor and enters `FAULT`. The
@@ -321,13 +328,43 @@ the web dashboard doesn't touch it at all, see
 | `lr2redux/cycle_count` | publish, retained | integer, persisted across reboots (NVS) |
 | `lr2redux/drawer_full` | publish, retained | `ON` once `drawer_cycles` reaches the configured threshold (`drawerFullCycles`, default 10) |
 | `lr2redux/drawer_cycles` | publish, retained | integer, cycles since the drawer was last emptied, persisted across reboots |
-| `lr2redux/drawer_threshold` | publish, retained | current `drawerFullCycles` value, published once on connect so clients don't need to hardcode it |
-| `lr2redux/heartbeat` | publish | uptime in seconds, every 30s |
+| `lr2redux/heartbeat` | publish | uptime in seconds, every 30s (raw, no HA discovery — see `lr2redux/uptime_seconds` below for the discoverable version) |
 | `lr2redux/cmd` | subscribe | `cycle` (manual trigger from IDLE), `reset_fault`, `drawer_emptied` (resets `drawer_cycles` to 0), `resume` (confirms a `SAFETY_STOP` that needs manual reset — a no-op otherwise) |
+| `lr2redux/uptime_seconds` | publish, retained | uptime in seconds, refreshed every state change and every 30s |
+| `lr2redux/rssi` | publish, retained | WiFi signal strength in dBm (`0` when not connected) |
+| `lr2redux/ip_address` | publish, retained | current IP, empty string when not connected |
+| `lr2redux/firmware_build` | publish, retained | compile-time build timestamp (`__DATE__ __TIME__`) |
+| `lr2redux/needs_manual_reset` | publish, retained | `ON`/`OFF` — true only while `state == safety_stop` and it needs an explicit `resume` (anti-pinch involvement, or `requireManualReset`) |
+| `lr2redux/cat_present_warning` | publish, retained | `ON`/`OFF` — true only while `state == cat_present` and it's exceeded `catPresentWarningSec` |
+
+Settings-page values are also mirrored on MQTT as read/write topics, matching
+the same fields/bounds as the web Settings page's HTTP `/save` (see
+[Config HTTP API](#config-http-api) below and `CFG_MIN_*`/`CFG_MAX_*` in
+`config.h`). Publishing to a `.../set` topic applies the change immediately —
+unlike `/save`, this never reboots the board, since none of these values need
+a restart to take effect:
+
+| Setting | State topic | Command topic | Bounds |
+|---|---|---|---|
+| Wait timer (min) | `lr2redux/wait_timer_min` | `lr2redux/wait_timer_min/set` | ≥ 2 |
+| Cat-present warning (min) | `lr2redux/cat_present_warning_min` | `lr2redux/cat_present_warning_min/set` | ≥ 2 |
+| Drawer-full threshold (cycles) | `lr2redux/drawer_threshold` | `lr2redux/drawer_threshold/set` | ≥ 1 |
+| Home overshoot (ms) | `lr2redux/home_overshoot_ms` | `lr2redux/home_overshoot_ms/set` | 0–15000 |
+| Dump shake step (ms) | `lr2redux/dump_shake_step_ms` | `lr2redux/dump_shake_step_ms/set` | 50–5000 |
+| Dump shake count | `lr2redux/dump_shake_count` | `lr2redux/dump_shake_count/set` | 0–20 |
+| Require manual reset | `lr2redux/require_manual_reset` | `lr2redux/require_manual_reset/set` | `ON`/`OFF` |
+
+An out-of-bounds write is rejected (not applied) and the state topic is
+republished with the board's real current value, so the Home Assistant
+entity snaps back instead of sticking on the rejected one. WiFi/MQTT network
+credentials are deliberately **not** exposed here — bootstrapping MQTT
+config over MQTT doesn't work, and credentials over a retained MQTT topic
+would be a bad idea regardless — those stay web-portal-only.
 
 Home Assistant MQTT discovery configs are published automatically on connect
-under `homeassistant/.../lr2redux/...` — the device, its cycle/drawer sensors,
-and the cycle-now/drawer-emptied buttons should all appear without any manual
+under `homeassistant/.../lr2redux/...` — the device, its sensors (including
+the ones above), the cycle/reset-fault/resume/drawer-emptied buttons, and the
+settings number/switch entities should all appear without any manual
 `configuration.yaml` entries.
 
 ### WebSocket dashboard interface
@@ -355,25 +392,26 @@ working fine, since the two don't share any state.
     "needsManualReset": false,
     "catPresentWarning": false,
     "ipAddress": "192.168.1.42",
-    "rssi": -58
+    "rssi": -58,
+    "firmwareBuild": "Jul 31 2026 10:00:00"
   }
   ```
   `needsManualReset` is only meaningful while `state == "safety_stop"`
   (see the state machine notes above); `catPresentWarning` only while
   `state == "cat_present"`. `rssi` is `0` when not connected — the
   dashboard's Status card checks connection state separately rather than
-  treating `0` as "no signal."
+  treating `0` as "no signal," and shows a qualitative label ("Fair"/"Weak")
+  next to the raw dBm value. `firmwareBuild` is the compile-time
+  `__DATE__ __TIME__` timestamp, shown in the Status card so you can
+  confirm which build is actually running on the device. All of the above
+  (plus a few not on the WS stream, like the drawer/cat sensors) are also
+  published to MQTT — see [MQTT topics](#mqtt-topics) above.
 - Commands go the other way as JSON text frames: `{"cmd":"cycle"}`,
   `{"cmd":"reset_fault"}`, `{"cmd":"drawer_emptied"}`, `{"cmd":"resume"}`
   (confirms a `SAFETY_STOP` that needs manual reset — a no-op otherwise) —
   same command set as the MQTT `lr2redux/cmd` topic, just a different
   transport.
 - No auth on either interface currently; see `web/README.md` for the caveat.
-- The JSON snapshot above also includes `ipAddress` and `rssi` (WiFi signal
-  strength in dBm, `0` when not connected — the dashboard's Status card
-  shows both, with a qualitative label like "Fair"/"Weak" next to the raw
-  dBm value). Added specifically to help diagnose intermittent WiFi
-  connection issues without needing serial access every time.
 
 ### Config HTTP API
 
@@ -383,7 +421,7 @@ normal operation (on the STA connection) — same handlers either way:
 | Route | Method | Body / response |
 |---|---|---|
 | `/scan` | GET | `{"status":"scanning"}` (202, poll again) or `{"networks":[{"ssid","rssi","secure"}]}` (200) |
-| `/config` | GET | current `{wifiSsid, mqttHost, mqttPort, mqttUser, waitTimerMin, requireManualReset, catPresentWarningMin, dayStartHour, dayEndHour, drawerFullCycles}` (passwords never read back) |
+| `/config` | GET | current `{wifiSsid, mqttHost, mqttPort, mqttUser, waitTimerMin, requireManualReset, catPresentWarningMin, dayStartHour, dayEndHour, drawerFullCycles, homeOvershootMs, dumpShakeStepMs, dumpShakeCount}` (passwords never read back) |
 | `/save` | POST | any subset of the same fields plus `wifiPass`/`mqttPass` — only fields present in the body are changed, everything else keeps its current value; blank password fields keep the existing one; saving always reboots the board |
 
 This is what both the captive-portal setup page and the Grommet dashboard's
@@ -479,18 +517,27 @@ See [`web/README.md`](web/README.md) — a Grommet + React single-page app that
 talks straight to the ESP32's own WebSocket server (no MQTT broker, no
 backend), organized into three tabs:
 
-- **Dashboard** — live state, cycle/drawer counts, `cycle` / `reset_fault` /
-  `drawer_emptied` / `resume` commands, IP address and WiFi signal strength,
-  and a 30-day usage summary (`UsageCard.tsx`, today/week/30-day totals plus
-  a daily bar chart, all computed client-side from raw visit timestamps in
-  the viewer's own local timezone — see "Usage analytics" below).
-- **Analytics** — a deeper dive into visit history: a scrollable list of
-  recent visit times and the average time between visits, split into
-  configurable day/night hours.
+- **Dashboard** — live state, cycle/drawer counts, uptime (days-hours-mins-secs),
+  `cycle` / `reset_fault` / `drawer_emptied` / `resume` commands, IP address,
+  WiFi signal strength, firmware build timestamp, and a 30-day usage summary
+  (`UsageCard.tsx`, today/week/30-day totals plus a daily bar chart, all
+  computed client-side from raw visit timestamps in the viewer's own local
+  timezone — see "Usage analytics" below).
+- **Analytics** — a deeper dive into visit history: the same 30-day visit bar
+  chart as the Dashboard tab's Usage card (shared via `VisitChart.tsx` /
+  `useDailyVisitBuckets.ts` rather than duplicated), the average time between
+  visits split into configurable day/night hours, and a scrollable list of
+  recent visit times with a CSV export (all up to 300 stored visits, not just
+  the ones shown on-screen).
 - **Settings** — WiFi/MQTT/wait-timer plus a collapsible "Advanced settings"
-  section (cat-present warning, manual-reset behavior, cycles-to-drawer-full)
-  over the same config HTTP API the setup portal uses, plus a firmware
-  update uploader directly from the browser.
+  section (cat-present warning, manual-reset behavior, cycles-to-drawer-full,
+  home overshoot, dump shake step/count — all also mirrored on MQTT, see
+  [MQTT topics](#mqtt-topics) above) over the same config HTTP API the setup
+  portal uses, plus a firmware update uploader directly from the browser.
+  Saving polls `/config` afterward until the board reconnects, since it
+  reboots immediately after responding — avoids a misleading "save failed"
+  from the connection dropping before the browser finishes reading the
+  response, and means no manual page refresh is needed to see the new values.
 
 **The board serves this itself** — `npm run build:device` in `web/` builds it
 straight into `./data`, which `pio run -t uploadfs` flashes to LittleFS. Once

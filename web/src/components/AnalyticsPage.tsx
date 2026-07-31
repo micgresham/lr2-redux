@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from "react";
 import { Box, Button, Card, CardBody, CardHeader, Select, Text } from "grommet";
 import { useAnalytics } from "../hooks/useAnalytics";
 import { useDeviceConfigApi } from "../hooks/useDeviceConfigApi";
+import { useDailyVisitBuckets } from "../hooks/useDailyVisitBuckets";
+import { VisitChart } from "./VisitChart";
 
 const HOUR_LABELS = Array.from({ length: 24 }, (_, h) => formatHour(h));
 const RECENT_VISITS_SHOWN = 50;
@@ -43,7 +45,7 @@ function formatDuration(seconds: number): string {
 
 export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
   const { data, error } = useAnalytics(deviceUrl);
-  const { save, saving, error: saveError } = useDeviceConfigApi(deviceUrl);
+  const { save, saving, reconnecting, error: saveError } = useDeviceConfigApi(deviceUrl);
 
   const [dayStartHour, setDayStartHour] = useState(6);
   const [dayEndHour, setDayEndHour] = useState(20);
@@ -61,6 +63,7 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
   }, [data, hydrated]);
 
   const visitTimes = useMemo(() => data?.visitTimes ?? [], [data]);
+  const { daily30 } = useDailyVisitBuckets(visitTimes);
 
   const { dayAvgSec, nightAvgSec, dayCount, nightCount } = useMemo(() => {
     const sorted = [...visitTimes].sort((a, b) => a - b);
@@ -82,7 +85,24 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
   const handleSaveHours = async () => {
     setSavedMsg(null);
     const ok = await save({ dayStartHour, dayEndHour });
-    if (ok) setSavedMsg("Saved. The board is rebooting.");
+    if (ok) setSavedMsg("Saved and reconnected.");
+  };
+
+  const handleExportCsv = () => {
+    const rows = [...visitTimes]
+      .sort((a, b) => a - b)
+      .map((t) => {
+        const dayOrNight = isDayHour(t, dayStartHour, dayEndHour) ? "Day" : "Night";
+        return `${t},${new Date(t * 1000).toISOString()},${dayOrNight}`;
+      });
+    const csv = ["epochSeconds,timestampUTC,dayOrNight", ...rows].join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `lr2redux-visits-${new Date().toISOString().slice(0, 10)}.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
   };
 
   return (
@@ -120,10 +140,10 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
             </Box>
           </Box>
           <Button
-            label={saving ? "Saving…" : "Save & reboot"}
+            label={saving ? "Saving…" : reconnecting ? "Reconnecting…" : "Save & reboot"}
             primary
             onClick={handleSaveHours}
-            disabled={saving}
+            disabled={saving || reconnecting}
             alignSelf="start"
           />
           {saveError && (
@@ -185,7 +205,28 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
 
       <Card>
         <CardHeader pad="medium">
+          <Text weight="bold">Visits per day</Text>
+        </CardHeader>
+        <CardBody pad={{ horizontal: "medium", bottom: "medium" }}>
+          {data ? (
+            <VisitChart daily30={daily30} />
+          ) : (
+            <Text size="small" color="text-weak">
+              No data yet.
+            </Text>
+          )}
+        </CardBody>
+      </Card>
+
+      <Card>
+        <CardHeader pad="medium" justify="between">
           <Text weight="bold">Recent visits</Text>
+          <Button
+            label="Export CSV"
+            size="small"
+            onClick={handleExportCsv}
+            disabled={visitTimes.length === 0}
+          />
         </CardHeader>
         <CardBody pad={{ horizontal: "medium", bottom: "medium" }} gap="small">
           {recentVisits.length === 0 ? (
@@ -214,7 +255,8 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
                 })}
               </Box>
               <Text size="xsmall" color="text-weak">
-                Showing latest {recentVisits.length} of {visitTimes.length} stored (up to 300).
+                Showing latest {recentVisits.length} of {visitTimes.length} stored (up to
+                300). CSV export includes all {visitTimes.length}.
               </Text>
             </>
           )}

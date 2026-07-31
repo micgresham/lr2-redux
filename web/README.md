@@ -62,9 +62,11 @@ match what the firmware's LittleFS-based static server expects.
   stop / fault), cat-present flag (flagged red with "(a while)" once it
   exceeds the configurable cat-present warning threshold), cycle count, a
   freshness indicator (flags red if no update in >15s, 3x the firmware's
-  broadcast interval), uptime, IP address, and WiFi signal strength (dBm plus
-  a qualitative Excellent/Good/Fair/Weak/Very weak label, colored red below
-  -75dBm).
+  broadcast interval), uptime (formatted as days-hours-mins-secs, e.g. `5d
+  10h 54m 56s`), IP address, WiFi signal strength (dBm plus a qualitative
+  Excellent/Good/Fair/Weak/Very weak label, colored red below -75dBm), and
+  the firmware's build timestamp (so you can confirm which build is
+  actually running on the device).
 - **Drawer** — cycles since last emptied against the configurable threshold
   reported by the firmware, plus a "Mark drawer emptied" button.
 - **Actions** — "Cycle now" (enabled only when idle), "Reset fault" (enabled
@@ -86,22 +88,33 @@ match what the firmware's LittleFS-based static server expects.
 - **Average time between visits** — the average gap between consecutive
   visits, computed separately for visits classified as "day" vs. "night"
   by each visit's local hour in your browser.
+- **Visits per day** — the same 30-day daily bar chart as the Dashboard tab's
+  Usage card, reused here via a shared `VisitChart.tsx` component and
+  `useDailyVisitBuckets.ts` hook rather than a second copy of the chart code.
 - **Recent visits** — a scrollable list of the most recent visit timestamps
-  (up to the last 300 the device stores), each tagged Day or Night.
+  (up to the last 300 the device stores), each tagged Day or Night, plus an
+  "Export CSV" button that downloads all stored visits (not just the ones
+  shown on-screen) as `epochSeconds,timestampUTC,dayOrNight` rows.
 
 ### Settings tab
 
 - WiFi SSID (with a "Scan for networks" button) and password, MQTT
   host/port/user/password, the cat-leaves wait timer, and — under a
   collapsible "Advanced settings" section — the cat-present warning
-  threshold, "require manual reset after any interruption," and cycles until
-  the drawer is considered full. Talks to the same `/scan`, `/config`,
-  `/save` HTTP routes the captive-portal setup page uses (see the root
-  README's "Config HTTP API" section) — this is the same config surface,
-  just reachable once the board is already on your network instead of only
-  during first-time setup. Saving reboots the board; if you changed the
-  WiFi network, the dashboard won't be able to reach it again until you
-  reconnect to that network too.
+  threshold, "require manual reset after any interruption," cycles until
+  the drawer is considered full, home overshoot duration, and dump shake
+  swing duration/count (all also mirrored on MQTT for Home Assistant — see
+  the root README's "MQTT topics" section). Talks to the same `/scan`,
+  `/config`, `/save` HTTP routes the captive-portal setup page uses (see the
+  root README's "Config HTTP API" section) — this is the same config
+  surface, just reachable once the board is already on your network instead
+  of only during first-time setup. Saving reboots the board; if you changed
+  the WiFi network, the dashboard won't be able to reach it again until you
+  reconnect to that network too. Otherwise, the button shows "Reconnecting…"
+  and the page polls `/config` in the background until the board comes back
+  up, then shows "Saved and reconnected" with the fresh values — no manual
+  page refresh needed, and a network hiccup right at reboot (expected, since
+  the board drops the connection mid-response) isn't reported as a failure.
 - **Firmware update** — upload a new `firmware.bin` directly from the
   browser (password-protected with the same `OTA_PASSWORD` as command-line
   OTA), with an upload-progress indicator.

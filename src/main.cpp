@@ -46,6 +46,14 @@
 #endif
 
 // ---------------------------------------------------------------------------
+// Firmware version
+// ---------------------------------------------------------------------------
+// Compile-time build timestamp rather than a manually-bumped version number -
+// always accurate (can't forget to bump it), and enough to answer "is this
+// the build I just flashed" from the dashboard, which is the actual need.
+static const char *FIRMWARE_BUILD = __DATE__ " " __TIME__;
+
+// ---------------------------------------------------------------------------
 // Pin map
 // ---------------------------------------------------------------------------
 // DRV8871 (production motor driver as of 2026-07-07) has no separate
@@ -96,18 +104,15 @@ static const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
 static const unsigned long HEARTBEAT_INTERVAL_MS = 30UL * 1000UL;
 static const unsigned long SETUP_HOLD_MS = 10UL * 1000UL; // hold the cycle button this long to force setup mode
 
-// Dump dwell + shake: pause 5s at Dump (lets waste finish falling through),
-// then oscillate direction briefly to dislodge anything stuck, before
-// reversing the rest of the way home. All placeholder durations, same
-// "unvalidated against real hardware" caveat as CYCLE_SEGMENT_TIMEOUT_MS.
+// Dump dwell: pause 5s at Dump (lets waste finish falling through) before
+// the shake/reverse. Placeholder duration, same "unvalidated against real
+// hardware" caveat as CYCLE_SEGMENT_TIMEOUT_MS. The shake step/count and
+// home-overshoot duration that used to live here are now runtime config
+// (cfg.dumpShakeStepMs/dumpShakeCount/homeOvershootMs) - see config.h -
+// since how far the motor needs to travel to dislodge clumps or level
+// litter depends on litter type/depth, not something one fixed build-time
+// value can suit for everyone.
 static const unsigned long DUMP_PAUSE_MS = 5UL * 1000UL;
-static const unsigned long DUMP_SHAKE_STEP_MS = 400UL;      // one direction's duration within the shake
-static const unsigned long DUMP_SHAKE_TOTAL_MS = 2400UL;    // ~3 full back-and-forth shakes
-
-// Home overshoot: keep reversing a few seconds past Home, then come back
-// forward to settle there - helps level litter that piled up to one side
-// during the dump. Placeholder duration, not yet tuned against real hardware.
-static const unsigned long HOME_OVERSHOOT_MS = 3UL * 1000UL;
 
 // If the weight switch (not anti-pinch) trips mid-motion, wait this long
 // after it clears before actually resuming, rather than continuing the
@@ -126,8 +131,39 @@ static const char *TOPIC_CYCLE_COUNT = "lr2redux/cycle_count";
 static const char *TOPIC_DRAWER_FULL = "lr2redux/drawer_full";
 static const char *TOPIC_DRAWER_CYCLES = "lr2redux/drawer_cycles";
 static const char *TOPIC_DRAWER_THRESHOLD = "lr2redux/drawer_threshold";
+static const char *TOPIC_DRAWER_THRESHOLD_CMD = "lr2redux/drawer_threshold/set";
 static const char *TOPIC_HEARTBEAT = "lr2redux/heartbeat";
 static const char *TOPIC_CMD = "lr2redux/cmd";
+
+// Extra sensor data - mirrors fields already in buildStateJson() (the web
+// dashboard's WS telemetry) so Home Assistant has the same visibility the
+// dashboard does, not just state/cat/cycles/drawer.
+static const char *TOPIC_UPTIME = "lr2redux/uptime_seconds";
+static const char *TOPIC_RSSI = "lr2redux/rssi";
+static const char *TOPIC_IP = "lr2redux/ip_address";
+static const char *TOPIC_FIRMWARE = "lr2redux/firmware_build";
+static const char *TOPIC_NEEDS_MANUAL_RESET = "lr2redux/needs_manual_reset";
+static const char *TOPIC_CAT_PRESENT_WARNING = "lr2redux/cat_present_warning";
+
+// Settings, mirrored from DeviceConfig (config.h) as read/write MQTT
+// entities (HA "number"/"switch") - the same fields the web Settings page
+// edits via HTTP /save, same validation bounds (config.h), so both control
+// surfaces stay in sync and can't disagree on what's a valid value. Unlike
+// /save, writing one of these never reboots the board - none of these
+// values need a restart to take effect (the state machine already reads
+// cfg.* live every loop() iteration) - see onMqttMessage().
+static const char *TOPIC_WAIT_TIMER_MIN = "lr2redux/wait_timer_min";
+static const char *TOPIC_WAIT_TIMER_MIN_CMD = "lr2redux/wait_timer_min/set";
+static const char *TOPIC_CAT_WARNING_MIN = "lr2redux/cat_present_warning_min";
+static const char *TOPIC_CAT_WARNING_MIN_CMD = "lr2redux/cat_present_warning_min/set";
+static const char *TOPIC_HOME_OVERSHOOT_MS = "lr2redux/home_overshoot_ms";
+static const char *TOPIC_HOME_OVERSHOOT_MS_CMD = "lr2redux/home_overshoot_ms/set";
+static const char *TOPIC_SHAKE_STEP_MS = "lr2redux/dump_shake_step_ms";
+static const char *TOPIC_SHAKE_STEP_MS_CMD = "lr2redux/dump_shake_step_ms/set";
+static const char *TOPIC_SHAKE_COUNT = "lr2redux/dump_shake_count";
+static const char *TOPIC_SHAKE_COUNT_CMD = "lr2redux/dump_shake_count/set";
+static const char *TOPIC_REQUIRE_MANUAL_RESET = "lr2redux/require_manual_reset";
+static const char *TOPIC_REQUIRE_MANUAL_RESET_CMD = "lr2redux/require_manual_reset/set";
 
 // ---------------------------------------------------------------------------
 // State machine
@@ -331,6 +367,22 @@ static void publishDrawerState() {
   mqtt.publish(TOPIC_DRAWER_CYCLES, buf, true);
 }
 
+// Shared by buildStateJson() (WS telemetry) and publishExtraSensors() (MQTT)
+// so the two control surfaces can't drift on what these mean.
+static bool needsManualResetNow() {
+  // Only meaningful while state == SAFETY_STOP - true if this episode needs
+  // an explicit resume (anti-pinch involvement, or cfg.requireManualReset)
+  // rather than auto-resuming on its own.
+  return state == State::SAFETY_STOP && (safetyStopAntiPinchInvolved || cfg.requireManualReset);
+}
+
+static bool catPresentWarningNow() {
+  // Only meaningful while state == CAT_PRESENT - the cat's been there
+  // longer than cfg.catPresentWarningSec.
+  return state == State::CAT_PRESENT &&
+         (millis() - stateEnteredAt) > (unsigned long)cfg.catPresentWarningSec * 1000UL;
+}
+
 // ---------------------------------------------------------------------------
 // Web dashboard: WebSocket state broadcast (JSON), replaces the browser
 // talking MQTT directly - only this firmware speaks MQTT now.
@@ -343,15 +395,8 @@ static void buildStateJson(JsonDocument &doc) {
   doc["drawerCycles"] = drawerCycles;
   doc["drawerThreshold"] = cfg.drawerFullCycles;
   doc["uptimeSeconds"] = millis() / 1000;
-  // Only meaningful while state == "safety_stop" - true if this episode
-  // needs an explicit resume (anti-pinch involvement, or
-  // cfg.requireManualReset) rather than auto-resuming on its own.
-  doc["needsManualReset"] = state == State::SAFETY_STOP &&
-                             (safetyStopAntiPinchInvolved || cfg.requireManualReset);
-  // Only meaningful while state == "cat_present" - the cat's been there
-  // longer than cfg.catPresentWarningSec.
-  doc["catPresentWarning"] = state == State::CAT_PRESENT &&
-                              (millis() - stateEnteredAt) > (unsigned long)cfg.catPresentWarningSec * 1000UL;
+  doc["needsManualReset"] = needsManualResetNow();
+  doc["catPresentWarning"] = catPresentWarningNow();
   doc["ipAddress"] = WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "";
   // Signal strength - not otherwise visible anywhere (not even the serial
   // log), added specifically to help diagnose the recurring ASSOC_LEAVE
@@ -361,6 +406,7 @@ static void buildStateJson(JsonDocument &doc) {
   // (not connected), distinguished by the dashboard checking connection
   // status separately rather than treating 0 as "no signal."
   doc["rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  doc["firmwareBuild"] = FIRMWARE_BUILD;
 }
 
 static void broadcastState() {
@@ -372,12 +418,51 @@ static void broadcastState() {
   ws.textAll(payload);
 }
 
+// Sensor data that only exists on the WS dashboard telemetry until now
+// (uptime, WiFi signal, IP, firmware build, the two warning flags) - added
+// to MQTT so Home Assistant has the same visibility the dashboard does.
+static void publishExtraSensors() {
+  if (!mqtt.connected()) return;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu", millis() / 1000);
+  mqtt.publish(TOPIC_UPTIME, buf, true);
+  bool wifiUp = WiFi.status() == WL_CONNECTED;
+  snprintf(buf, sizeof(buf), "%d", wifiUp ? WiFi.RSSI() : 0);
+  mqtt.publish(TOPIC_RSSI, buf, true);
+  mqtt.publish(TOPIC_IP, wifiUp ? WiFi.localIP().toString().c_str() : "", true);
+  mqtt.publish(TOPIC_FIRMWARE, FIRMWARE_BUILD, true);
+  mqtt.publish(TOPIC_NEEDS_MANUAL_RESET, needsManualResetNow() ? "ON" : "OFF", true);
+  mqtt.publish(TOPIC_CAT_PRESENT_WARNING, catPresentWarningNow() ? "ON" : "OFF", true);
+}
+
+// The Settings-page values (config.h) as MQTT state - published on connect
+// and whenever one changes via onMqttMessage(), so Home Assistant's number/
+// switch entities always show the board's actual current value (including
+// snapping back to it if a written value was out of bounds and rejected).
+static void publishSettingsState() {
+  if (!mqtt.connected()) return;
+  char buf[16];
+  snprintf(buf, sizeof(buf), "%lu", cfg.waitTimerSec / 60);
+  mqtt.publish(TOPIC_WAIT_TIMER_MIN, buf, true);
+  snprintf(buf, sizeof(buf), "%lu", cfg.catPresentWarningSec / 60);
+  mqtt.publish(TOPIC_CAT_WARNING_MIN, buf, true);
+  snprintf(buf, sizeof(buf), "%lu", cfg.drawerFullCycles);
+  mqtt.publish(TOPIC_DRAWER_THRESHOLD, buf, true);
+  snprintf(buf, sizeof(buf), "%lu", cfg.homeOvershootMs);
+  mqtt.publish(TOPIC_HOME_OVERSHOOT_MS, buf, true);
+  snprintf(buf, sizeof(buf), "%lu", cfg.dumpShakeStepMs);
+  mqtt.publish(TOPIC_SHAKE_STEP_MS, buf, true);
+  snprintf(buf, sizeof(buf), "%lu", cfg.dumpShakeCount);
+  mqtt.publish(TOPIC_SHAKE_COUNT, buf, true);
+  mqtt.publish(TOPIC_REQUIRE_MANUAL_RESET, cfg.requireManualReset ? "ON" : "OFF", true);
+}
+
 // Minimal Home Assistant MQTT discovery so the unit shows up automatically.
 static void publishHomeAssistantDiscovery() {
   const char *deviceBlock =
       "\"device\":{\"identifiers\":[\"lr2redux\"],\"name\":\"Litter Robot 2\",\"manufacturer\":\"lr2-redux\"}";
 
-  char payload[512];
+  char payload[700];
 
   snprintf(payload, sizeof(payload),
            "{\"name\":\"LR2 State\",\"uniq_id\":\"lr2redux_state\","
@@ -420,6 +505,114 @@ static void publishHomeAssistantDiscovery() {
            "\"cmd_t\":\"%s\",\"payload_press\":\"drawer_emptied\",%s}",
            TOPIC_CMD, deviceBlock);
   mqtt.publish("homeassistant/button/lr2redux/drawer_emptied/config", payload, true);
+
+  // These two already worked over plain MQTT (handleCommand() accepts them
+  // on TOPIC_CMD same as cycle/drawer_emptied) but weren't Home-Assistant-
+  // discoverable, so they never showed up as pressable entities.
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Reset Fault\",\"uniq_id\":\"lr2redux_reset_fault_btn\","
+           "\"cmd_t\":\"%s\",\"payload_press\":\"reset_fault\",%s}",
+           TOPIC_CMD, deviceBlock);
+  mqtt.publish("homeassistant/button/lr2redux/reset_fault/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Resume\",\"uniq_id\":\"lr2redux_resume_btn\","
+           "\"cmd_t\":\"%s\",\"payload_press\":\"resume\",%s}",
+           TOPIC_CMD, deviceBlock);
+  mqtt.publish("homeassistant/button/lr2redux/resume/config", payload, true);
+
+  // Extra sensors - mirrors fields already in the web dashboard's WS
+  // telemetry (buildStateJson()), published by publishExtraSensors().
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Uptime\",\"uniq_id\":\"lr2redux_uptime\","
+           "\"stat_t\":\"%s\",\"unit_of_meas\":\"s\",\"dev_cla\":\"duration\",%s}",
+           TOPIC_UPTIME, deviceBlock);
+  mqtt.publish("homeassistant/sensor/lr2redux/uptime/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 WiFi Signal\",\"uniq_id\":\"lr2redux_rssi\","
+           "\"stat_t\":\"%s\",\"unit_of_meas\":\"dBm\",\"dev_cla\":\"signal_strength\",%s}",
+           TOPIC_RSSI, deviceBlock);
+  mqtt.publish("homeassistant/sensor/lr2redux/rssi/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 IP Address\",\"uniq_id\":\"lr2redux_ip\","
+           "\"stat_t\":\"%s\",\"ent_cat\":\"diagnostic\",%s}",
+           TOPIC_IP, deviceBlock);
+  mqtt.publish("homeassistant/sensor/lr2redux/ip/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Firmware Build\",\"uniq_id\":\"lr2redux_firmware\","
+           "\"stat_t\":\"%s\",\"ent_cat\":\"diagnostic\",%s}",
+           TOPIC_FIRMWARE, deviceBlock);
+  mqtt.publish("homeassistant/sensor/lr2redux/firmware/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Needs Manual Reset\",\"uniq_id\":\"lr2redux_needs_manual_reset\","
+           "\"stat_t\":\"%s\",\"dev_cla\":\"problem\",%s}",
+           TOPIC_NEEDS_MANUAL_RESET, deviceBlock);
+  mqtt.publish("homeassistant/binary_sensor/lr2redux/needs_manual_reset/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Cat Present Warning\",\"uniq_id\":\"lr2redux_cat_warning\","
+           "\"stat_t\":\"%s\",\"dev_cla\":\"problem\",%s}",
+           TOPIC_CAT_PRESENT_WARNING, deviceBlock);
+  mqtt.publish("homeassistant/binary_sensor/lr2redux/cat_warning/config", payload, true);
+
+  // Settings, as writable "number"/"switch" entities - same fields/bounds
+  // as the web Settings page's HTTP /save (config.h holds the shared
+  // bounds). Applied immediately on receipt, no reboot needed - see
+  // onMqttMessage().
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Wait Timer (min)\",\"uniq_id\":\"lr2redux_wait_timer\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"min\":%d,\"max\":60,\"step\":1,"
+           "\"unit_of_meas\":\"min\",\"ent_cat\":\"config\",%s}",
+           TOPIC_WAIT_TIMER_MIN_CMD, TOPIC_WAIT_TIMER_MIN, CFG_MIN_WAIT_TIMER_MIN, deviceBlock);
+  mqtt.publish("homeassistant/number/lr2redux/wait_timer/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Cat Present Warning (min)\",\"uniq_id\":\"lr2redux_cat_warning_min\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"min\":%d,\"max\":60,\"step\":1,"
+           "\"unit_of_meas\":\"min\",\"ent_cat\":\"config\",%s}",
+           TOPIC_CAT_WARNING_MIN_CMD, TOPIC_CAT_WARNING_MIN, CFG_MIN_CAT_WARNING_MIN, deviceBlock);
+  mqtt.publish("homeassistant/number/lr2redux/cat_warning_min/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Drawer Full Threshold\",\"uniq_id\":\"lr2redux_drawer_threshold\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"min\":%d,\"max\":100,\"step\":1,"
+           "\"unit_of_meas\":\"cycles\",\"ent_cat\":\"config\",%s}",
+           TOPIC_DRAWER_THRESHOLD_CMD, TOPIC_DRAWER_THRESHOLD, CFG_MIN_DRAWER_FULL_CYCLES, deviceBlock);
+  mqtt.publish("homeassistant/number/lr2redux/drawer_threshold/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Home Overshoot (ms)\",\"uniq_id\":\"lr2redux_home_overshoot\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"min\":%d,\"max\":%d,\"step\":100,"
+           "\"unit_of_meas\":\"ms\",\"ent_cat\":\"config\",%s}",
+           TOPIC_HOME_OVERSHOOT_MS_CMD, TOPIC_HOME_OVERSHOOT_MS, CFG_MIN_HOME_OVERSHOOT_MS,
+           CFG_MAX_HOME_OVERSHOOT_MS, deviceBlock);
+  mqtt.publish("homeassistant/number/lr2redux/home_overshoot/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Shake Swing Duration (ms)\",\"uniq_id\":\"lr2redux_shake_step\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"min\":%d,\"max\":%d,\"step\":50,"
+           "\"unit_of_meas\":\"ms\",\"ent_cat\":\"config\",%s}",
+           TOPIC_SHAKE_STEP_MS_CMD, TOPIC_SHAKE_STEP_MS, CFG_MIN_SHAKE_STEP_MS,
+           CFG_MAX_SHAKE_STEP_MS, deviceBlock);
+  mqtt.publish("homeassistant/number/lr2redux/shake_step/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Number Of Shakes\",\"uniq_id\":\"lr2redux_shake_count\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"min\":%d,\"max\":%d,\"step\":1,"
+           "\"ent_cat\":\"config\",%s}",
+           TOPIC_SHAKE_COUNT_CMD, TOPIC_SHAKE_COUNT, CFG_MIN_SHAKE_COUNT,
+           CFG_MAX_SHAKE_COUNT, deviceBlock);
+  mqtt.publish("homeassistant/number/lr2redux/shake_count/config", payload, true);
+
+  snprintf(payload, sizeof(payload),
+           "{\"name\":\"LR2 Require Manual Reset\",\"uniq_id\":\"lr2redux_require_manual_reset\","
+           "\"cmd_t\":\"%s\",\"stat_t\":\"%s\",\"ent_cat\":\"config\",%s}",
+           TOPIC_REQUIRE_MANUAL_RESET_CMD, TOPIC_REQUIRE_MANUAL_RESET, deviceBlock);
+  mqtt.publish("homeassistant/switch/lr2redux/require_manual_reset/config", payload, true);
 }
 
 // ---------------------------------------------------------------------------
@@ -445,8 +638,54 @@ static void onMqttMessage(char *topic, uint8_t *payload, unsigned int length) {
   for (unsigned int i = 0; i < length; i++) msg += (char)payload[i];
   msg.trim();
 
-  if (String(topic) == TOPIC_CMD) {
+  String t = String(topic);
+
+  if (t == TOPIC_CMD) {
     handleCommand(msg);
+    return;
+  }
+
+  // Settings writes - same fields/bounds as config_api.cpp's /save handler
+  // (config.h holds the shared bounds). An out-of-bounds value is rejected
+  // (not applied), same as /save, but publishSettingsState() always runs
+  // below so Home Assistant's entity snaps back to the real current value
+  // rather than sticking on a rejected one.
+  bool isSettingsTopic = true;
+  bool accepted = false;
+  if (t == TOPIC_WAIT_TIMER_MIN_CMD) {
+    int minutes = msg.toInt();
+    accepted = minutes >= CFG_MIN_WAIT_TIMER_MIN;
+    if (accepted) cfg.waitTimerSec = (uint32_t)minutes * 60UL;
+  } else if (t == TOPIC_CAT_WARNING_MIN_CMD) {
+    int minutes = msg.toInt();
+    accepted = minutes >= CFG_MIN_CAT_WARNING_MIN;
+    if (accepted) cfg.catPresentWarningSec = (uint32_t)minutes * 60UL;
+  } else if (t == TOPIC_DRAWER_THRESHOLD_CMD) {
+    int cycles = msg.toInt();
+    accepted = cycles >= CFG_MIN_DRAWER_FULL_CYCLES;
+    if (accepted) cfg.drawerFullCycles = (uint32_t)cycles;
+  } else if (t == TOPIC_HOME_OVERSHOOT_MS_CMD) {
+    int ms = msg.toInt();
+    accepted = ms >= CFG_MIN_HOME_OVERSHOOT_MS && ms <= CFG_MAX_HOME_OVERSHOOT_MS;
+    if (accepted) cfg.homeOvershootMs = (uint32_t)ms;
+  } else if (t == TOPIC_SHAKE_STEP_MS_CMD) {
+    int ms = msg.toInt();
+    accepted = ms >= CFG_MIN_SHAKE_STEP_MS && ms <= CFG_MAX_SHAKE_STEP_MS;
+    if (accepted) cfg.dumpShakeStepMs = (uint32_t)ms;
+  } else if (t == TOPIC_SHAKE_COUNT_CMD) {
+    int count = msg.toInt();
+    accepted = count >= CFG_MIN_SHAKE_COUNT && count <= CFG_MAX_SHAKE_COUNT;
+    if (accepted) cfg.dumpShakeCount = (uint32_t)count;
+  } else if (t == TOPIC_REQUIRE_MANUAL_RESET_CMD) {
+    cfg.requireManualReset = (msg == "ON" || msg == "true" || msg == "1");
+    accepted = true;
+  } else {
+    isSettingsTopic = false;
+  }
+
+  if (isSettingsTopic) {
+    if (accepted) saveConfig(cfg);
+    publishSettingsState();
   }
 }
 
@@ -572,12 +811,18 @@ static void connectMqttIfNeeded() {
 
   if (ok) {
     mqtt.subscribe(TOPIC_CMD);
+    mqtt.subscribe(TOPIC_WAIT_TIMER_MIN_CMD);
+    mqtt.subscribe(TOPIC_CAT_WARNING_MIN_CMD);
+    mqtt.subscribe(TOPIC_DRAWER_THRESHOLD_CMD);
+    mqtt.subscribe(TOPIC_HOME_OVERSHOOT_MS_CMD);
+    mqtt.subscribe(TOPIC_SHAKE_STEP_MS_CMD);
+    mqtt.subscribe(TOPIC_SHAKE_COUNT_CMD);
+    mqtt.subscribe(TOPIC_REQUIRE_MANUAL_RESET_CMD);
     publishHomeAssistantDiscovery();
     publishState();
     publishDrawerState();
-    char buf[8];
-    snprintf(buf, sizeof(buf), "%lu", cfg.drawerFullCycles);
-    mqtt.publish(TOPIC_DRAWER_THRESHOLD, buf, true);
+    publishSettingsState();
+    publishExtraSensors();
   }
 }
 
@@ -901,21 +1146,28 @@ static void runStateMachine() {
       }
       break;
 
-    case State::CYCLE_DUMP_SHAKE:
-      if (elapsed > DUMP_SHAKE_TOTAL_MS) {
+    case State::CYCLE_DUMP_SHAKE: {
+      // Runtime-configurable (cfg.dumpShakeStepMs/dumpShakeCount) - see
+      // config.h. dumpShakeCount == 0 means totalMs == 0, so this falls
+      // through to CYCLE_TO_HOME on the very next iteration, skipping the
+      // shake entirely.
+      unsigned long stepMs = cfg.dumpShakeStepMs > 0 ? cfg.dumpShakeStepMs : 1;
+      unsigned long totalMs = stepMs * cfg.dumpShakeCount * 2UL;
+      if (elapsed > totalMs) {
         motorStop();
         motorRunReverse();
         enterState(State::CYCLE_TO_HOME);
       } else {
-        // Oscillate direction every DUMP_SHAKE_STEP_MS to dislodge stuck
-        // waste - driven purely by elapsed time, no separate step counter
-        // needed, and self-corrects correctly on a SAFETY_STOP resume too
-        // (elapsed restarts at 0, so the shake just starts over cleanly).
-        bool forwardPhase = (elapsed / DUMP_SHAKE_STEP_MS) % 2 == 0;
+        // Oscillate direction every stepMs to dislodge stuck waste - driven
+        // purely by elapsed time, no separate step counter needed, and
+        // self-corrects correctly on a SAFETY_STOP resume too (elapsed
+        // restarts at 0, so the shake just starts over cleanly).
+        bool forwardPhase = (elapsed / stepMs) % 2 == 0;
         if (forwardPhase) motorRunForward();
         else motorRunReverse();
       }
       break;
+    }
 
     case State::CYCLE_TO_HOME:
       if (hallHome.isActive()) {
@@ -932,10 +1184,9 @@ static void runStateMachine() {
       break;
 
     case State::CYCLE_HOME_OVERSHOOT:
-      // Still reversing (unchanged from CYCLE_TO_HOME) for a few more
-      // seconds past Home. Placeholder duration (HOME_OVERSHOOT_MS), not
-      // yet tuned against real hardware.
-      if (elapsed > HOME_OVERSHOOT_MS) {
+      // Still reversing (unchanged from CYCLE_TO_HOME) for a bit past
+      // Home. Runtime-configurable (cfg.homeOvershootMs) - see config.h.
+      if (elapsed > cfg.homeOvershootMs) {
         motorStop();
         motorRunForward();
         enterState(State::CYCLE_HOME_SETTLE);
@@ -1156,6 +1407,12 @@ static const char *resetReasonName(esp_reset_reason_t reason) {
 void setup() {
   Serial.begin(115200);
 
+  // PubSubClient defaults to a 256-byte MQTT packet buffer - too small for
+  // the Home Assistant discovery payloads added alongside the Settings
+  // number/switch entities (device block + min/max/step/unit fields push
+  // several of them past 256 bytes), which would otherwise fail silently.
+  mqtt.setBufferSize(1024);
+
   // safe regardless of mode: motor pins driven low before anything else runs.
   // Both IN1/IN2 are PWM-capable (DRV8871: PWM whichever pin is the active
   // direction, hold the other at 0) rather than one direction pin + a
@@ -1287,6 +1544,7 @@ void loop() {
   runStateMachine();
   if (state != prevState) {
     publishState();
+    publishExtraSensors(); // needsManualReset/catPresentWarning can flip on a state change too
     broadcastState();
   }
 
@@ -1296,6 +1554,10 @@ void loop() {
     char buf[16];
     snprintf(buf, sizeof(buf), "%lu", millis() / 1000);
     mqtt.publish(TOPIC_HEARTBEAT, buf);
+    // Periodic refresh so uptime/RSSI/catPresentWarning stay current even
+    // when nothing has changed state (e.g. mid WAIT_TIMER or a long
+    // CAT_PRESENT triggering the warning without any state transition).
+    publishExtraSensors();
   }
 
   // Serial-only diagnostic heartbeat, independent of MQTT - added

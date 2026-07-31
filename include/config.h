@@ -37,7 +37,40 @@ struct DeviceConfig {
   // cats), so it's user-tunable rather than a fixed guess. Default matches
   // the original hardcoded value; enforced minimum of 1 in config_api.cpp.
   uint32_t drawerFullCycles = 10;
+  // How long (ms) the motor keeps reversing past Home at the end of a
+  // cycle before coming back forward to settle - see CYCLE_HOME_OVERSHOOT
+  // in main.cpp. There's no rotary encoder, so "how far past Home" is only
+  // controllable as time at the motor's fixed PWM speed, not a true angle -
+  // more time = more rotation. Tune this per litter type/depth to level the
+  // litter without dragging the globe too far. Default matches the
+  // original hardcoded placeholder (3s). Enforced minimum in config_api.cpp.
+  uint32_t homeOvershootMs = 3000;
+  // Dump-position shake, to dislodge stuck clumps before reversing home:
+  // the motor oscillates forward/reverse, each swing lasting
+  // dumpShakeStepMs, for dumpShakeCount total back-and-forth swings (total
+  // shake duration = dumpShakeStepMs * dumpShakeCount * 2). Same "time
+  // instead of angle" caveat as homeOvershootMs applies to
+  // dumpShakeStepMs - a longer swing rotates further at the same motor
+  // speed. dumpShakeCount = 0 skips the shake phase entirely. Defaults
+  // match the original hardcoded placeholders (400ms step, 3 shakes).
+  // Enforced minimums in config_api.cpp.
+  uint32_t dumpShakeStepMs = 400;
+  uint32_t dumpShakeCount = 3;
 };
+
+// Validation bounds for the fields above - shared between config_api.cpp
+// (HTTP /save, used by the web Settings page) and main.cpp (MQTT settings
+// topics, used by Home Assistant) so the two control surfaces can't
+// silently disagree on what's a valid value.
+static const int CFG_MIN_WAIT_TIMER_MIN = 2;
+static const int CFG_MIN_CAT_WARNING_MIN = 2;
+static const int CFG_MIN_DRAWER_FULL_CYCLES = 1;
+static const int CFG_MIN_HOME_OVERSHOOT_MS = 0;
+static const int CFG_MAX_HOME_OVERSHOOT_MS = 15000;
+static const int CFG_MIN_SHAKE_STEP_MS = 50;
+static const int CFG_MAX_SHAKE_STEP_MS = 5000;
+static const int CFG_MIN_SHAKE_COUNT = 0;
+static const int CFG_MAX_SHAKE_COUNT = 20;
 
 void loadConfig(DeviceConfig &cfg);
 void saveConfig(const DeviceConfig &cfg);
