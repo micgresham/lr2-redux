@@ -60,6 +60,14 @@ function toHttpBase(deviceUrl: string): string {
 const RECONNECT_POLL_MS = 3000;
 const RECONNECT_MAX_ATTEMPTS = 10; // ~30s of polling before giving up
 
+// The device's ESP.restart() doesn't always tear the TCP connection down
+// cleanly (a WiFi radio drop mid-flush has no FIN/RST to send) - without a
+// bound, fetch() can hang indefinitely instead of rejecting, which left
+// "Saving..." stuck forever with no error until the user manually refreshed.
+// A save is a tiny JSON payload the device responds to in milliseconds when
+// it responds at all, so 5s is generous, not tight.
+const SAVE_REQUEST_TIMEOUT_MS = 5000;
+
 export function useDeviceConfigApi(deviceUrl: string) {
   const base = toHttpBase(deviceUrl);
   const [config, setConfig] = useState<DeviceConfigPayload | null>(null);
@@ -117,6 +125,7 @@ export function useDeviceConfigApi(deviceUrl: string) {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(input),
+          signal: AbortSignal.timeout(SAVE_REQUEST_TIMEOUT_MS),
         });
       } catch {
         // Expected most of the time - see the comment above. Not a real
@@ -132,7 +141,9 @@ export function useDeviceConfigApi(deviceUrl: string) {
       for (let attempt = 0; attempt < RECONNECT_MAX_ATTEMPTS; attempt++) {
         await new Promise((r) => setTimeout(r, RECONNECT_POLL_MS));
         try {
-          const res = await fetch(`${base}/config`);
+          const res = await fetch(`${base}/config`, {
+            signal: AbortSignal.timeout(SAVE_REQUEST_TIMEOUT_MS),
+          });
           const data = (await res.json()) as DeviceConfigPayload;
           setConfig(data);
           setReconnecting(false);
