@@ -6,7 +6,21 @@ import { useDailyVisitBuckets } from "../hooks/useDailyVisitBuckets";
 import { VisitChart } from "./VisitChart";
 
 const HOUR_LABELS = Array.from({ length: 24 }, (_, h) => formatHour(h));
-const RECENT_VISITS_SHOWN = 50;
+
+function localDayStartMs(epochSec: number): number {
+  const d = new Date(epochSec * 1000);
+  d.setHours(0, 0, 0, 0);
+  return d.getTime();
+}
+
+function formatDayLabel(dayStartMs: number): string {
+  return new Date(dayStartMs).toLocaleDateString(undefined, {
+    weekday: "long",
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
 
 function formatHour(h: number): string {
   const period = h < 12 ? "AM" : "PM";
@@ -77,10 +91,30 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
     };
   }, [visitTimes, dayStartHour, dayEndHour]);
 
-  const recentVisits = useMemo(
-    () => [...visitTimes].sort((a, b) => b - a).slice(0, RECENT_VISITS_SHOWN),
-    [visitTimes],
-  );
+  // One page per local calendar day (not a rolling 24h window from "now") -
+  // same day-bucketing approach as UsageCard's "Today" fix, so a page's
+  // contents don't shift as time passes while you're looking at it.
+  const visitPages = useMemo(() => {
+    const byDay = new Map<number, number[]>();
+    for (const t of visitTimes) {
+      const key = localDayStartMs(t);
+      const bucket = byDay.get(key);
+      if (bucket) bucket.push(t);
+      else byDay.set(key, [t]);
+    }
+    return [...byDay.entries()]
+      .sort((a, b) => b[0] - a[0])
+      .map(([dayStartMs, times]) => ({
+        dayStartMs,
+        times: times.sort((a, b) => b - a),
+      }));
+  }, [visitTimes]);
+
+  const [pageIndex, setPageIndex] = useState(0);
+  const clampedPageIndex = Math.min(pageIndex, Math.max(0, visitPages.length - 1));
+  const currentPage = visitPages[clampedPageIndex];
+  const canGoNewer = clampedPageIndex > 0;
+  const canGoOlder = clampedPageIndex < visitPages.length - 1;
 
   const handleSaveHours = async () => {
     setSavedMsg(null);
@@ -229,18 +263,36 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
           />
         </CardHeader>
         <CardBody pad={{ horizontal: "medium", bottom: "medium" }} gap="small">
-          {recentVisits.length === 0 ? (
+          {!currentPage ? (
             <Text size="small" color="text-weak">
               No visits recorded yet.
             </Text>
           ) : (
             <>
+              <Box direction="row" justify="between" align="center">
+                <Button
+                  label="◂ Newer"
+                  size="small"
+                  onClick={() => setPageIndex(clampedPageIndex - 1)}
+                  disabled={!canGoNewer}
+                />
+                <Text size="small" weight="bold">
+                  {formatDayLabel(currentPage.dayStartMs)}
+                </Text>
+                <Button
+                  label="Older ▸"
+                  size="small"
+                  onClick={() => setPageIndex(clampedPageIndex + 1)}
+                  disabled={!canGoOlder}
+                />
+              </Box>
               <Box overflow={{ vertical: "auto" }} height={{ max: "320px" }} gap="xxsmall">
-                {recentVisits.map((t) => {
+                {currentPage.times.map((t) => {
                   const isDay = isDayHour(t, dayStartHour, dayEndHour);
                   return (
                     <Box
                       key={t}
+                      flex={{ shrink: 0 }}
                       direction="row"
                       justify="between"
                       align="center"
@@ -255,8 +307,9 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
                 })}
               </Box>
               <Text size="xsmall" color="text-weak">
-                Showing latest {recentVisits.length} of {visitTimes.length} stored (up to
-                300). CSV export includes all {visitTimes.length}.
+                {currentPage.times.length} visit{currentPage.times.length === 1 ? "" : "s"} this
+                day. Page {clampedPageIndex + 1} of {visitPages.length}. CSV export includes all{" "}
+                {visitTimes.length} stored (up to 300).
               </Text>
             </>
           )}
