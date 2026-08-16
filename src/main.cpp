@@ -33,6 +33,7 @@
 #include <LittleFS.h>
 #include <time.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 #include "config.h"
 #include "config_api.h"
 #include "setup_portal.h"
@@ -387,6 +388,31 @@ static bool catPresentWarningNow() {
 // Web dashboard: WebSocket state broadcast (JSON), replaces the browser
 // talking MQTT directly - only this firmware speaks MQTT now.
 // ---------------------------------------------------------------------------
+// Reports the WiFi driver's *actual* power-save mode rather than what we
+// believe we set. Added 2026-08-15 after mDNS was isolated to "the
+// responder answers unicast queries fine, but group-addressed (multicast)
+// queries never reach it at all, while 10 other devices on the same LAN
+// answer multicast from the same machine" - the classic signature of a
+// station asleep at DTIM, since the AP buffers multicast for delivery
+// only at DTIM beacons while unicast is buffered per-station and stays
+// reliable. WiFi.setSleep(false) is already called on every mDNS start,
+// but nothing ever verified it took effect or stayed in effect (ESP-IDF
+// can reset the PS mode on reassociation), so this stops the guessing:
+// if this reads "none" while multicast is still being missed, the cause
+// is physical (RSSI has been -82/-83 dBm at the install location, and
+// multicast gets no link-layer retransmission) and no further firmware
+// change will help.
+static const char *wifiPowerSaveName() {
+  wifi_ps_type_t ps = WIFI_PS_NONE;
+  if (esp_wifi_get_ps(&ps) != ESP_OK) return "unknown";
+  switch (ps) {
+    case WIFI_PS_NONE: return "none";
+    case WIFI_PS_MIN_MODEM: return "min_modem";
+    case WIFI_PS_MAX_MODEM: return "max_modem";
+    default: return "unknown";
+  }
+}
+
 static void buildStateJson(JsonDocument &doc) {
   doc["state"] = stateName(state);
   doc["catPresent"] = weightSwitch.isActive();
@@ -406,6 +432,7 @@ static void buildStateJson(JsonDocument &doc) {
   // (not connected), distinguished by the dashboard checking connection
   // status separately rather than treating 0 as "no signal."
   doc["rssi"] = WiFi.status() == WL_CONNECTED ? WiFi.RSSI() : 0;
+  doc["wifiPowerSave"] = wifiPowerSaveName();
   doc["firmwareBuild"] = FIRMWARE_BUILD;
 }
 
@@ -827,53 +854,102 @@ static void connectMqttIfNeeded() {
 }
 
 static bool otaMdnsArmed = false;
+static IPAddress mdnsBoundIp;              // the IP the responder is currently advertising
+static unsigned long lastMdnsStart = 0;
+static bool arduinoOtaInProgress = false;  // set by the ArduinoOTA callbacks below
 
-// mDNS is what makes ws://lr2redux.local/ws and the OTA upload target
-// resolve on the LAN. Re-armed on every fresh connect, not just the first
-// one ever (that was a real bug, caught 2026-07-06): mDNS/OTA used to be
-// gated behind a one-time latch that never ran again after the first
-// successful connect, but the underlying network interface gets torn down
-// and rebuilt on every WiFi disconnect/reconnect - which we know happens
-// periodically here (see the ASSOC_LEAVE investigation elsewhere in this
-// file) - and the mDNS responder doesn't survive that on its own. Result:
-// lr2redux.local worked right after boot, then silently stopped resolving
-// after the first reconnect, while the IP-based dashboard kept working
-// fine (plain TCP/HTTP over the new connection, unaffected by mDNS
-// state) - exactly the "sporadic" failure reported. Detecting the
-// disconnected->connected transition (like connectWifiIfNeeded() already
-// does) and tearing down + re-arming both MDNS and ArduinoOTA each time
-// fixes it.
-static void setupOtaIfNeeded() {
-  static bool wasConnected = false;
-  bool isConnected = WiFi.status() == WL_CONNECTED;
-  bool justConnected = isConnected && !wasConnected;
-  wasConnected = isConnected;
-  if (!justConnected) return;
+// How often the mDNS responder is torn down and restarted while otherwise
+// idle. A restart costs a few milliseconds and only makes the .local name
+// briefly unavailable, so erring on the frequent side is cheap.
+static const unsigned long MDNS_REFRESH_INTERVAL_MS = 5UL * 60UL * 1000UL;
 
+// mDNS is what makes http://lr2redux.local/ and the OTA upload target
+// resolve on the LAN. It gets (re)started on three separate triggers, each
+// of which was a real observed failure mode:
+//
+//   1. "wifi connected" - the underlying network interface is torn down and
+//      rebuilt on every WiFi disconnect/reconnect (which we know happens
+//      periodically here, see the ASSOC_LEAVE investigation in CLAUDE.md)
+//      and the responder does not survive that. This used to be gated
+//      behind a one-time latch that never ran again after the first
+//      successful connect - a real bug caught 2026-07-06, which is why the
+//      name worked right after boot and then went quiet, while the IP-based
+//      dashboard kept working fine (plain TCP/HTTP, unaffected by mDNS).
+//   2. "ip changed" - a DHCP lease renewal can hand out a different address
+//      without WiFi.status() ever leaving WL_CONNECTED, so trigger 1 never
+//      fires and the advertised A record keeps pointing at an address that
+//      is no longer ours. Resolution then "works" but connects nowhere.
+//   3. "periodic refresh" - the responder can also simply go quiet on its
+//      own (multicast group membership lost on the netif, or an AP that
+//      rate-limits/stops forwarding multicast) with nothing observable
+//      happening at the WiFi-status level at all. Nothing in-band detects
+//      that, so restart on a timer rather than leaving the name dark until
+//      the next reconnect, which may be hours away.
+//
+// Note the deliberate WiFi.setSleep(false) on every restart: ESP32 modem
+// sleep periodically powers the radio down, which makes it miss incoming
+// mDNS multicast queries. A direct IP connection still works (it does not
+// depend on catching a one-off multicast packet), but .local resolution
+// becomes unreliable or fails outright - the same "sporadic" symptom.
+static void startMdnsAndOta(const char *reason) {
   if (otaMdnsArmed) {
     MDNS.end();
     ArduinoOTA.end();
   }
   otaMdnsArmed = true;
 
-  // ESP32 WiFi modem-sleep (power-save) periodically powers the radio down,
-  // which makes it miss incoming mDNS multicast queries - a direct IP
-  // connection still works fine (it doesn't depend on catching a one-off
-  // multicast packet), but lr2redux.local resolution becomes unreliable or
-  // silently fails outright. Disabling sleep is the standard fix.
   WiFi.setSleep(false);
   MDNS.begin("lr2redux");
   MDNS.addService("http", "tcp", 80);
+  mdnsBoundIp = WiFi.localIP();
+  lastMdnsStart = millis();
+
+  ArduinoOTA.setHostname("lr2redux");
+  ArduinoOTA.setPassword(OTA_PASSWORD);
+  ArduinoOTA.onStart([]() {
+    arduinoOtaInProgress = true;
+    motorStop();
+  });
+  ArduinoOTA.onEnd([]() { arduinoOtaInProgress = false; });
+  ArduinoOTA.onError([](ota_error_t) { arduinoOtaInProgress = false; });
+  ArduinoOTA.begin();
+
   // mDNS (lr2redux.local) doesn't resolve on every network - some routers/
   // guest or enterprise WiFi block multicast, and Windows needs Bonjour
   // installed. Printing the IP directly is a robust fallback that always
   // works: check the serial monitor once, or your router's DHCP client list.
-  Serial.printf("WiFi connected: %s - reachable at http://lr2redux.local/ or http://%s/\n",
-                WiFi.localIP().toString().c_str(), WiFi.localIP().toString().c_str());
-  ArduinoOTA.setHostname("lr2redux");
-  ArduinoOTA.setPassword(OTA_PASSWORD);
-  ArduinoOTA.onStart([]() { motorStop(); });
-  ArduinoOTA.begin();
+  // Logging the trigger reason too, so a serial capture from the next time
+  // the name goes missing shows whether the responder was being restarted
+  // at all, and on what.
+  Serial.printf("[mdns] responder started (%s) - http://lr2redux.local/ or http://%s/\n", reason,
+                mdnsBoundIp.toString().c_str());
+}
+
+static void setupOtaIfNeeded() {
+  static bool wasConnected = false;
+  bool isConnected = WiFi.status() == WL_CONNECTED;
+  bool justConnected = isConnected && !wasConnected;
+  wasConnected = isConnected;
+  if (!isConnected) return;
+
+  const char *reason = nullptr;
+  if (justConnected || !otaMdnsArmed) {
+    reason = "wifi connected";
+  } else if (WiFi.localIP() != mdnsBoundIp) {
+    reason = "ip changed";
+  } else if (millis() - lastMdnsStart > MDNS_REFRESH_INTERVAL_MS) {
+    reason = "periodic refresh";
+  }
+  if (reason == nullptr) return;
+
+  // Never tear the responder down mid-flash: ArduinoOTA.end() during an
+  // espota upload kills it, and the web OTA path is streaming into
+  // Update at the same priority. The refresh isn't urgent - it'll happen
+  // on the next loop() pass once the upload finishes (or on the reboot
+  // that follows a successful one).
+  if (arduinoOtaInProgress || Update.isRunning()) return;
+
+  startMdnsAndOta(reason);
 }
 
 // ---------------------------------------------------------------------------
@@ -1469,7 +1545,19 @@ void setup() {
                      resetReason == ESP_RST_INT_WDT ||
                      resetReason == ESP_RST_TASK_WDT ||
                      resetReason == ESP_RST_WDT ||
-                     resetReason == ESP_RST_EXT;
+                     resetReason == ESP_RST_EXT ||
+                     // ESP_RST_SW added 2026-08-15: an OTA reboot and every
+                     // ESP.restart() (including the web Settings "Save &
+                     // reboot" path) land here. The reason the teardown is
+                     // skipped on a clean power-on is that the ROM
+                     // bootloader zeroes BSS - but a *software* reset does
+                     // not clear RAM, so it leaves lwIP's static pools in
+                     // exactly the indeterminate state this teardown
+                     // exists to fix. Observed for real: an espota flash
+                     // completed cleanly and the board then failed to
+                     // rejoin WiFi at all until it was physically power
+                     // cycled (2026-08-15).
+                     resetReason == ESP_RST_SW;
   // Printed unconditionally (not just on dirty resets) so every serial
   // capture has boot cause available for free - useful diagnostic context
   // on its own, e.g. for correlating WiFi connection problems against
@@ -1490,6 +1578,14 @@ void setup() {
   // actual WiFi.begin() call and reconnect logic; this just brings the
   // interface up first so AsyncTCP has something to attach to.
   WiFi.mode(WIFI_STA);
+
+  // Register the same name with DHCP, so the router's own DNS can resolve
+  // "lr2redux" independently of mDNS. Many home routers serve their DHCP
+  // client names as local DNS - where that works it's a resolution path
+  // that doesn't depend on multicast at all, and so keeps working when the
+  // mDNS responder is the thing that's broken. Must be set before the
+  // first WiFi.begin() (which happens later, in connectWifiIfNeeded()).
+  WiFi.setHostname("lr2redux");
 
   // Cap the transmission power (Options: 19.5, 17, 15, 13, 11, 8.5, 7, 5, 2)
   // 15dBm or 13dBm drastically cuts current spikes while keeping decent range
@@ -1570,9 +1666,15 @@ void loop() {
   if (millis() - lastSerialHeartbeat > HEARTBEAT_INTERVAL_MS) {
     lastSerialHeartbeat = millis();
     bool wifiUp = WiFi.status() == WL_CONNECTED;
-    Serial.printf("Heartbeat: uptime=%lus, freeHeap=%u, state=%s, wifi=%s, rssi=%s\n", millis() / 1000,
-                  ESP.getFreeHeap(), stateName(state), wifiUp ? "up" : "down",
-                  wifiUp ? (String(WiFi.RSSI()) + "dBm").c_str() : "n/a");
+    // Re-assert power-save-off every heartbeat, not just at connect time:
+    // ESP-IDF can reset the PS mode on reassociation, and a station that
+    // sleeps at DTIM silently stops receiving multicast (i.e. mDNS
+    // queries) while unicast keeps working - see wifiPowerSaveName().
+    // Cheap and idempotent, so there's no reason to be clever about it.
+    if (wifiUp) WiFi.setSleep(false);
+    Serial.printf("Heartbeat: uptime=%lus, freeHeap=%u, state=%s, wifi=%s, rssi=%s, ps=%s\n",
+                  millis() / 1000, ESP.getFreeHeap(), stateName(state), wifiUp ? "up" : "down",
+                  wifiUp ? (String(WiFi.RSSI()) + "dBm").c_str() : "n/a", wifiPowerSaveName());
   }
 
   // periodic broadcast so uptime/telemetry stays fresh in the dashboard even
