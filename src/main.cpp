@@ -37,8 +37,11 @@
 #include "config.h"
 #include "config_api.h"
 #include "setup_portal.h"
+#include "pins.h"
+#if defined(CONFIG_IDF_TARGET_ESP32)
 #include "soc/soc.h"
 #include "soc/rtc_cntl_reg.h"
+#endif
 
 #if __has_include("secrets.h")
 #include "secrets.h"
@@ -57,31 +60,40 @@ static const char *FIRMWARE_BUILD = __DATE__ " " __TIME__;
 // ---------------------------------------------------------------------------
 // Pin map
 // ---------------------------------------------------------------------------
-// DRV8871 (production motor driver as of 2026-07-07) has no separate
-// enable/PWM pin - IN1/IN2 are PWM'd directly instead, whichever is the
-// active direction. GPIO25 (the old L298N ENA line) is no longer used here;
-// it's still driven from the breadboard/diagnostic tool since that keeps
-// the L298N ENA line alive there and costs nothing on a DRV8871 board.
-static const uint8_t PIN_MOTOR_IN1 = 26;
-static const uint8_t PIN_MOTOR_IN2 = 27;
-static const uint8_t PIN_HALL_HOME = 34; // input-only pin, needs external pull-up to 3.3V
-static const uint8_t PIN_HALL_DUMP = 35; // input-only pin, needs external pull-up to 3.3V
-static const uint8_t PIN_WEIGHT_SWITCH = 32; // stock mechanical cat-weight switch
-static const uint8_t PIN_ANTI_PINCH = 14; // stock anti-pinch switch, physically split from the weight
-                                           // switch's shared loop - see CLAUDE.md "Pins 6/7 topology"
-static const uint8_t PIN_MANUAL_BUTTON = 33; // optional stock "cycle now" button
-// Three discrete LEDs (not a bi-color/2-channel part) replicating the
-// original stock board's status language exactly - see CLAUDE.md for the
-// mapping and README's "Status LED" table.
-static const uint8_t PIN_LED_GREEN = 4;
-static const uint8_t PIN_LED_YELLOW = 16;
-static const uint8_t PIN_LED_RED = 17;
+// PIN_MOTOR_IN1/IN2, PIN_HALL_HOME/DUMP, PIN_WEIGHT_SWITCH, PIN_ANTI_PINCH,
+// PIN_MANUAL_BUTTON and the three LED pins all live in include/pins.h, which
+// picks the right map for the build target (classic ESP32 vs ESP32-C6).
 
 static const uint8_t PWM_CHANNEL_IN1 = 0;
 static const uint8_t PWM_CHANNEL_IN2 = 1;
 static const uint16_t PWM_FREQ_HZ = 5000;
 static const uint8_t PWM_RESOLUTION_BITS = 8;
 static const uint8_t MOTOR_SPEED = 220; // 0-255, stays below full 255 to soften inrush/noise
+
+// Arduino-ESP32 3.x dropped the channel-addressed LEDC API (ledcSetup +
+// ledcAttachPin, ledcWrite-by-channel) in favour of addressing the pin
+// directly. The classic ESP32 build still runs on core 2.0.17, so both forms
+// have to keep working - these two shims are the only place that difference
+// shows up.
+static inline void motorPwmAttach(uint8_t pin, uint8_t channel) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  (void)channel;
+  ledcAttach(pin, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
+#else
+  ledcSetup(channel, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
+  ledcAttachPin(pin, channel);
+#endif
+}
+
+static inline void motorPwmWrite(uint8_t pin, uint8_t channel, uint8_t duty) {
+#if ESP_ARDUINO_VERSION_MAJOR >= 3
+  (void)channel;
+  ledcWrite(pin, duty);
+#else
+  (void)pin;
+  ledcWrite(channel, duty);
+#endif
+}
 
 // Hall sensors and the weight switch are wired active-low (pulled up, sensor
 // pulls the line to GND when triggered).
@@ -311,13 +323,13 @@ static DebouncedInput manualButton;
 // Motor control
 // ---------------------------------------------------------------------------
 static void motorStop() {
-  ledcWrite(PWM_CHANNEL_IN1, 0);
-  ledcWrite(PWM_CHANNEL_IN2, 0);
+  motorPwmWrite(PIN_MOTOR_IN1, PWM_CHANNEL_IN1, 0);
+  motorPwmWrite(PIN_MOTOR_IN2, PWM_CHANNEL_IN2, 0);
 }
 
 static void motorRunForward() {
-  ledcWrite(PWM_CHANNEL_IN2, 0);
-  ledcWrite(PWM_CHANNEL_IN1, MOTOR_SPEED);
+  motorPwmWrite(PIN_MOTOR_IN2, PWM_CHANNEL_IN2, 0);
+  motorPwmWrite(PIN_MOTOR_IN1, PWM_CHANNEL_IN1, MOTOR_SPEED);
 }
 
 // Home->Dump runs forward; Dump->Home runs reverse - confirmed on real
@@ -326,8 +338,8 @@ static void motorRunForward() {
 // without this fix let the motor keep running forward past the Dump
 // sensor entirely, overshooting the intended stop.
 static void motorRunReverse() {
-  ledcWrite(PWM_CHANNEL_IN1, 0);
-  ledcWrite(PWM_CHANNEL_IN2, MOTOR_SPEED);
+  motorPwmWrite(PIN_MOTOR_IN1, PWM_CHANNEL_IN1, 0);
+  motorPwmWrite(PIN_MOTOR_IN2, PWM_CHANNEL_IN2, MOTOR_SPEED);
 }
 
 // ---------------------------------------------------------------------------
@@ -756,10 +768,16 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 enum class WifiConnectPhase { IDLE, SCANNING };
 static WifiConnectPhase wifiConnectPhase = WifiConnectPhase::IDLE;
 
-// This macro forces the linker to execute this function during the initial boot loader phase
+// This macro forces the linker to execute this function during the initial boot loader phase.
+// Classic-ESP32 only: RTC_CNTL_BROWN_OUT_REG doesn't exist on the C6, where the
+// brownout detector moved into the LP analog peripheral and there's no
+// equivalent register poke. Disable it there via the platform's
+// `custom_sdkconfig = CONFIG_ESP_BROWNOUT_DET=n` instead, if it's ever wanted.
+#if defined(CONFIG_IDF_TARGET_ESP32)
 void __attribute__((constructor)) pre_init_disable_brownout() {
-    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0); 
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
 }
+#endif
 
 static void connectWifiIfNeeded() {
   static unsigned long lastAttempt = 0;
@@ -1493,10 +1511,8 @@ void setup() {
   // Both IN1/IN2 are PWM-capable (DRV8871: PWM whichever pin is the active
   // direction, hold the other at 0) rather than one direction pin + a
   // separate ENA speed pin.
-  ledcSetup(PWM_CHANNEL_IN1, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
-  ledcSetup(PWM_CHANNEL_IN2, PWM_FREQ_HZ, PWM_RESOLUTION_BITS);
-  ledcAttachPin(PIN_MOTOR_IN1, PWM_CHANNEL_IN1);
-  ledcAttachPin(PIN_MOTOR_IN2, PWM_CHANNEL_IN2);
+  motorPwmAttach(PIN_MOTOR_IN1, PWM_CHANNEL_IN1);
+  motorPwmAttach(PIN_MOTOR_IN2, PWM_CHANNEL_IN2);
   motorStop();
 
   pinMode(PIN_LED_RED, OUTPUT);

@@ -20,6 +20,18 @@
 #include <WiFi.h>
 #include <ArduinoJson.h>
 #include <ESPAsyncWebServer.h>
+// This bring-up tool targets the classic-ESP32 breadboard rig (L298N with its
+// ENA line on GPIO25) - see CLAUDE.md. The guard just keeps it from failing to
+// compile if it's ever pointed at a target without RTC_CNTL_BROWN_OUT_REG.
+#if defined(CONFIG_IDF_TARGET_ESP32)
+#include "soc/soc.h"
+#include "soc/rtc_cntl_reg.h"
+
+// This macro forces the linker to execute this function during the initial boot loader phase
+void __attribute__((constructor)) pre_init_disable_brownout() {
+    WRITE_PERI_REG(RTC_CNTL_BROWN_OUT_REG, 0);
+}
+#endif
 
 // ---------------------------------------------------------------------------
 // Pin map - must match the real board's pinout (README.md / main.cpp)

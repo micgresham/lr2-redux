@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+#
+# PlatformIO wrapper for [env:esp32c6], isolated into its own core directory.
+#
+# Why this exists: the pioarduino platform the C6 needs registers itself under
+# the name "espressif32" - the same name as the official platform the classic
+# ESP32 build uses - and both declare a package called
+# framework-arduinoespressif32. They therefore overwrite each other in a shared
+# PLATFORMIO_CORE_DIR: switching between `-e esp32dev` and `-e esp32c6` forces a
+# full framework re-download each way, and the first build right after a switch
+# fails outright (it installs the framework, then errors; re-running works).
+#
+# Pointing the C6 at its own core dir gives each platform its own packages, so
+# neither build ever disturbs the other. Costs one extra copy of the toolchain
+# on disk (~1GB); buys never having to think about build order.
+#
+# Usage:
+#   scripts/pio-c6                      # build (run -e esp32c6)
+#   scripts/pio-c6 run -t upload        # build + flash firmware, then chained fs
+#   scripts/pio-c6 run -t uploadfs      # dashboard/LittleFS only
+#   scripts/pio-c6 device monitor       # serial console (USB CDC on this board)
+#
+# `-e esp32c6` is appended automatically when no environment is given, so this
+# wrapper can never pull the classic ESP32 platform into the isolated core dir.
+#
+# scripts/build_web.py chains `uploadfs` onto `upload` by re-invoking platformio
+# as a subprocess; that inherits PLATFORMIO_CORE_DIR from here, so the chained
+# step stays inside the isolated dir too.
+#
+# Override the location with LR2_C6_CORE_DIR if ~/.platformio-c6 isn't wanted.
+
+set -euo pipefail
+
+export PLATFORMIO_CORE_DIR="${LR2_C6_CORE_DIR:-$HOME/.platformio-c6}"
+
+if [ "$#" -eq 0 ]; then
+  set -- run -e esp32c6
+fi
+
+# Append the environment unless one was named explicitly. Guarding this matters:
+# a bare `run` with no -e would build every environment in platformio.ini and
+# drag the official espressif32 platform into this dir as well, which is exactly
+# the collision the wrapper exists to avoid.
+needs_env=0
+case " $* " in
+  *" run "*|*" check "*|*" debug "*) needs_env=1 ;;
+esac
+case " $* " in
+  *" -e "*|*" --environment "*) needs_env=0 ;;
+esac
+if [ "$needs_env" -eq 1 ]; then
+  set -- "$@" -e esp32c6
+fi
+
+echo "[pio-c6] PLATFORMIO_CORE_DIR=$PLATFORMIO_CORE_DIR"
+echo "[pio-c6] pio $*"
+exec pio "$@"

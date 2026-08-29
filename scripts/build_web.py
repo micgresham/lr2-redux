@@ -53,11 +53,16 @@ def after_upload(source, target, env):
     # not, the exit-code check below at least surfaces the failure instead
     # of silently leaving the device without a dashboard.
     time.sleep(2)
-    rc = env.Execute("$PYTHONEXE -m platformio run -e esp32dev -t uploadfs")
+    # Chain onto whichever environment is being uploaded, not a hardcoded one -
+    # this script is attached to every board target now (esp32dev, esp32c6),
+    # and uploading the filesystem image of the wrong env would flash a
+    # different board's LittleFS partition layout.
+    pioenv = env["PIOENV"]
+    rc = env.Execute("$PYTHONEXE -m platformio run -e %s -t uploadfs" % pioenv)
     if rc != 0:
         print("[build_web] *** uploadfs FAILED (exit %s) - the dashboard was NOT "
-              "updated on the device. Run `pio run -e esp32dev -t uploadfs` "
-              "manually once the port is free. ***" % rc)
+              "updated on the device. Run `pio run -e %s -t uploadfs` "
+              "manually once the port is free. ***" % (rc, pioenv))
     else:
         print("[build_web] filesystem upload complete - dashboard is live.")
 

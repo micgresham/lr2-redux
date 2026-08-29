@@ -1,0 +1,24 @@
+# Partition table for [env:esp32c6] (4MB flash).
+#
+# The stock default.csv gives each OTA slot 1.25MB, and the C6 build lands at
+# 1.27MB - i.e. it overflows, and even trimmed to fit it would leave no room to
+# add anything. Arduino core 3.x / IDF 5.5 is simply a bigger image than the
+# core 2.0.17 the classic ESP32 build uses (that one sits at ~1.0MB).
+#
+# So: 1.5MB per app slot, and the filesystem drops from 1.4MB to 896KB. The
+# dashboard image (data/) is ~500KB, so that's still comfortable headroom.
+# Two app slots are non-negotiable here - OTA needs somewhere to write the
+# incoming image, and this project relies on OTA for both firmware and
+# filesystem updates.
+#
+# NOT applied to [env:esp32dev]: changing a partition table invalidates OTA
+# against an already-flashed device (it would need a serial reflash to adopt
+# the new layout), and that build is at 76.5% with room to spare.
+#
+# Name,     Type, SubType,  Offset,   Size,     Flags
+nvs,        data, nvs,      0x9000,   0x5000,
+otadata,    data, ota,      0xe000,   0x2000,
+app0,       app,  ota_0,    0x10000,  0x180000,
+app1,       app,  ota_1,    0x190000, 0x180000,
+spiffs,     data, spiffs,   0x310000, 0xE0000,
+coredump,   data, coredump, 0x3F0000, 0x10000,
