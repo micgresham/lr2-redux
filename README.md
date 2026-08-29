@@ -8,7 +8,7 @@ all still good; this project reuses every one of them as-is, wired into the
 new board instead of the dead one.
 
 Adds MQTT + Home Assistant auto-discovery so the unit reports state and accepts a
-manual "cycle now" command over WiFi.
+manual "cycle now" command over WiFi (which also cuts a running wait timer short).
 
 ## Bill of materials
 
@@ -41,7 +41,7 @@ and pinout and was checked against the pinout table below as of
 | GPIO35 | Hall - Dump | input-only pin, needs the external 10k pull-up (no internal pull-up available) |
 | GPIO32 | Weight/cat switch | active-low, internal pull-up used |
 | GPIO14 | Anti-pinch switch | **active-HIGH** (opposite of every other input here), internal pull-up used — see "Weight switch and anti-pinch switch" below before wiring this one |
-| GPIO33 | Manual cycle button (optional) | active-low, internal pull-up used |
+| GPIO33 | Manual cycle button (optional) | active-low, internal pull-up used — starts a cycle from `IDLE` or cuts a running `WAIT_TIMER` short; also confirms a `SAFETY_STOP` that needs manual reset |
 | GPIO4 | Status LED — green | see "Status LED" below |
 | GPIO16 | Status LED — yellow | see "Status LED" below |
 | GPIO17 | Status LED — red | see "Status LED" below |
@@ -263,6 +263,18 @@ BOOT_HOMING → IDLE ⇄ CAT_PRESENT → WAIT_TIMER → CYCLE_TO_DUMP → CYCLE_
   (`SettingsCard.tsx`), with a **hard-enforced 2-minute minimum** — both
   client-side and, authoritatively, in `config_api.cpp` — so it can't be set
   low enough to risk cycling while the cat is still in or near the globe.
+- **A manual trigger during `WAIT_TIMER` starts the cycle early** rather
+  than being ignored until the machine is back at `IDLE` — either the
+  physical button (GPIO33) or a `cycle` command over MQTT/WebSocket. It
+  takes the exact same transition into `CYCLE_TO_DUMP` that the elapsed
+  timer takes, so the cycle runs the full normal sequence and counts toward
+  `cycleCount` and the drawer-full tally like any timed cycle; there is no
+  separate "manual cycle" bookkeeping. The weight-switch check still runs
+  first, so if the cat has come back the machine goes to `CAT_PRESENT` and
+  the press is discarded rather than cycling with the cat in the globe.
+  (A `cycle` command sent while the cat is *still* present stays latched and
+  fires the moment they leave, skipping the wait — same latch that has
+  always applied to a request arriving mid-cycle.)
 - At Dump, the motor stops and **dwells 5s** (`CYCLE_DUMP_PAUSE`, fixed) so
   waste finishes falling through, then **shakes** briefly — oscillating
   direction every `dumpShakeStepMs` (default 400ms) for `dumpShakeCount`
@@ -329,7 +341,7 @@ the web dashboard doesn't touch it at all, see
 | `lr2redux/drawer_full` | publish, retained | `ON` once `drawer_cycles` reaches the configured threshold (`drawerFullCycles`, default 10) |
 | `lr2redux/drawer_cycles` | publish, retained | integer, cycles since the drawer was last emptied, persisted across reboots |
 | `lr2redux/heartbeat` | publish | uptime in seconds, every 30s (raw, no HA discovery — see `lr2redux/uptime_seconds` below for the discoverable version) |
-| `lr2redux/cmd` | subscribe | `cycle` (manual trigger from IDLE), `reset_fault`, `drawer_emptied` (resets `drawer_cycles` to 0), `resume` (confirms a `SAFETY_STOP` that needs manual reset — a no-op otherwise) |
+| `lr2redux/cmd` | subscribe | `cycle` (manual trigger — starts a cycle from `IDLE`, or cuts a running `WAIT_TIMER` short), `reset_fault`, `drawer_emptied` (resets `drawer_cycles` to 0), `resume` (confirms a `SAFETY_STOP` that needs manual reset — a no-op otherwise) |
 | `lr2redux/uptime_seconds` | publish, retained | uptime in seconds, refreshed every state change and every 30s |
 | `lr2redux/rssi` | publish, retained | WiFi signal strength in dBm (`0` when not connected) |
 | `lr2redux/ip_address` | publish, retained | current IP, empty string when not connected |

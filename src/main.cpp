@@ -1213,6 +1213,16 @@ static void runStateMachine() {
       if (weightSwitch.isActive()) {
         // cat came back before the timer elapsed - cancel and wait it out again
         enterState(State::CAT_PRESENT);
+      } else if (manualCycleRequested || manualButton.isActive()) {
+        // Manual trigger skips the rest of the wait timer rather than being
+        // ignored until IDLE. Deliberately the exact same transition as the
+        // timer-elapsed branch below - it enters CYCLE_TO_DUMP the same way,
+        // so it runs the full normal sequence and counts toward cycleCount /
+        // the drawer-full tally like any timed cycle, not as a special case.
+        // Checked after the weight switch so a cat that came back still wins.
+        manualCycleRequested = false;
+        motorRunForward();
+        enterState(State::CYCLE_TO_DUMP);
       } else if (elapsed >= (unsigned long)cfg.waitTimerSec * 1000UL) {
         motorRunForward();
         enterState(State::CYCLE_TO_DUMP);
