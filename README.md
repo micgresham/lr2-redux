@@ -497,6 +497,14 @@ a cat that briefly leaves and returns before `WAIT_TIMER` elapses:
   entirely client-side against each timestamp's *local browser* hour — the
   board's own clock stays UTC/DST-free internally (see NTP setup above), so
   this is the one place that should ever apply the viewer's timezone.
+- The day/night averages count **only the time inside each bucket's own
+  hours**. Averaging the raw differences between consecutive day visits
+  would be wrong: the gap from one evening's last daytime visit to the next
+  morning's first swallows the whole night, which inflated a set of ordinary
+  2-4h daytime gaps to nearly 8h on real data. Each gap is clipped to its
+  own window instead, so that one contributes the daylight at either end and
+  none of the night. Time after a window's last visit and before the next
+  one's first is still counted - it genuinely elapsed with no visit.
 
 ### Persistence, OTA, and the drawer counter
 

@@ -38,10 +38,52 @@ function isDayHour(epochSec: number, dayStartHour: number, dayEndHour: number): 
   return hour >= dayStartHour || hour < dayEndHour; // window wraps midnight
 }
 
-function averageGapSeconds(sortedTimes: number[]): number | null {
+// Seconds between two instants that actually fall inside the window
+// `inWindow` describes. Walks local-hour-aligned segments so the classifier
+// only ever sees an instant whose whole segment shares its local hour;
+// stepping by a fixed 3600s keeps it terminating across DST shifts even
+// though the local clock jumps there.
+function windowSecondsBetween(
+  startSec: number,
+  endSec: number,
+  inWindow: (epochSec: number) => boolean,
+): number {
+  if (endSec <= startSec) return 0;
+  let total = 0;
+  let cursor = startSec;
+  while (cursor < endSec) {
+    const d = new Date(cursor * 1000);
+    d.setMinutes(0, 0, 0);
+    const segEnd = Math.min(Math.floor(d.getTime() / 1000) + 3600, endSec);
+    if (inWindow(cursor)) total += segEnd - cursor;
+    cursor = segEnd;
+  }
+  return total;
+}
+
+// Average time between visits *within* a window's own hours.
+//
+// The naive version - filter to the window's visits, then average the raw
+// consecutive differences - is wrong, and badly so: the gap from the last
+// day visit on one date to the first day visit on the next swallows the
+// entire intervening night, so a handful of ordinary 2-4h daytime gaps
+// average out to something like 8h. Instead each gap is clipped to the
+// hours the window actually covers, which is the only reading of "average
+// time between visits during the day" that answers the question asked.
+//
+// The clipped total still includes the tail of a window after its last
+// visit and the head of the next before its first - that time genuinely
+// elapsed with no visit, so it belongs in the average. What it no longer
+// includes is time from the *other* window.
+function averageWindowGapSeconds(
+  sortedTimes: number[],
+  inWindow: (epochSec: number) => boolean,
+): number | null {
   if (sortedTimes.length < 2) return null;
   let total = 0;
-  for (let i = 1; i < sortedTimes.length; i++) total += sortedTimes[i] - sortedTimes[i - 1];
+  for (let i = 1; i < sortedTimes.length; i++) {
+    total += windowSecondsBetween(sortedTimes[i - 1], sortedTimes[i], inWindow);
+  }
   return total / (sortedTimes.length - 1);
 }
 
@@ -81,11 +123,13 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
 
   const { dayAvgSec, nightAvgSec, dayCount, nightCount } = useMemo(() => {
     const sorted = [...visitTimes].sort((a, b) => a - b);
-    const dayTimes = sorted.filter((t) => isDayHour(t, dayStartHour, dayEndHour));
-    const nightTimes = sorted.filter((t) => !isDayHour(t, dayStartHour, dayEndHour));
+    const isDay = (t: number) => isDayHour(t, dayStartHour, dayEndHour);
+    const isNight = (t: number) => !isDay(t);
+    const dayTimes = sorted.filter(isDay);
+    const nightTimes = sorted.filter(isNight);
     return {
-      dayAvgSec: averageGapSeconds(dayTimes),
-      nightAvgSec: averageGapSeconds(nightTimes),
+      dayAvgSec: averageWindowGapSeconds(dayTimes, isDay),
+      nightAvgSec: averageWindowGapSeconds(nightTimes, isNight),
       dayCount: dayTimes.length,
       nightCount: nightTimes.length,
     };
@@ -222,6 +266,12 @@ export function AnalyticsPage({ deviceUrl }: { deviceUrl: string }) {
               </Text>
             </Box>
           </Box>
+          <Text size="xsmall" color="text-weak">
+            Each average counts only the time inside its own window — a gap
+            running from one evening's last daytime visit to the next
+            morning's first contributes the daylight at either end, not the
+            night in between.
+          </Text>
           {visitTimes.length > 0 && visitTimes.length < 4 && (
             <Text size="xsmall" color="text-weak">
               Averages need at least a couple of visits in each bucket to
