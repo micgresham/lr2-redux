@@ -27,6 +27,15 @@ void loadConfig(DeviceConfig &cfg) {
 void saveConfig(const DeviceConfig &cfg) {
   Preferences prefs;
   prefs.begin(NVS_NAMESPACE, false);
+  // Drop the "these credentials have worked" marker only when the WiFi
+  // credentials themselves actually change. A save that touches only MQTT or
+  // the advanced settings must not re-arm main.cpp's setup-mode fallback -
+  // otherwise an unrelated settings change made while the router happened to
+  // be rebooting would send a perfectly good board into AP mode.
+  if (prefs.getString("wifiSsid", "") != cfg.wifiSsid ||
+      prefs.getString("wifiPass", "") != cfg.wifiPass) {
+    prefs.putBool("wifiOk", false);
+  }
   prefs.putString("wifiSsid", cfg.wifiSsid);
   prefs.putString("wifiPass", cfg.wifiPass);
   prefs.putString("mqttHost", cfg.mqttHost);
@@ -47,6 +56,22 @@ void saveConfig(const DeviceConfig &cfg) {
 
 bool isWifiConfigured(const DeviceConfig &cfg) {
   return cfg.wifiSsid.length() > 0;
+}
+
+bool isWifiValidated() {
+  Preferences prefs;
+  prefs.begin(NVS_NAMESPACE, true);
+  bool ok = prefs.getBool("wifiOk", false);
+  prefs.end();
+  return ok;
+}
+
+void markWifiValidated() {
+  if (isWifiValidated()) return; // already set - don't rewrite NVS on every reconnect
+  Preferences prefs;
+  prefs.begin(NVS_NAMESPACE, false);
+  prefs.putBool("wifiOk", true);
+  prefs.end();
 }
 
 bool consumeForceSetupFlag() {

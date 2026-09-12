@@ -76,6 +76,14 @@ void loadConfig(DeviceConfig &cfg);
 void saveConfig(const DeviceConfig &cfg);
 bool isWifiConfigured(const DeviceConfig &cfg);
 
+// "Have these WiFi credentials ever actually connected?" - persisted, but
+// deliberately NOT part of DeviceConfig: it isn't user-editable settings,
+// it's a fact the firmware learns at runtime. Gates the give-up-and-return-
+// to-setup-mode fallback in main.cpp (see WIFI_PROVISION_TIMEOUT_MS there).
+// Cleared by saveConfig() only when the SSID or password actually changes.
+bool isWifiValidated();
+void markWifiValidated();
+
 // The 10s-button-hold path and the "no WiFi configured" boot path both need
 // to force a boot into setup mode. Since switching WiFi/server modes cleanly
 // at runtime is fiddly, we just flag it in NVS and reboot - setup() reads

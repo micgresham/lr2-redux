@@ -133,6 +133,12 @@ void startSetupPortal(DeviceConfig &cfg) {
   portalServer.onNotFound(handleRoot); // catch-all so captive-portal detection pops the page
 
   portalServer.begin();
+
+  // Setup mode had no serial output whatsoever, which made it indistinguishable
+  // from a hang or a boot loop in a serial capture - loop() returns early here,
+  // so not even the 30s heartbeat runs. One line removes that ambiguity.
+  Serial.printf("[setup] portal up - join \"%s\" (password \"%s\") then browse to http://%s/\n",
+                AP_SSID, AP_PASSWORD, AP_IP.toString().c_str());
 }
 
 void setupPortalLoop() {

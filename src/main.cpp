@@ -33,6 +33,7 @@
 #include <LittleFS.h>
 #include <time.h>
 #include <esp_system.h>
+#include <esp_idf_version.h> // ESP_IDF_VERSION / ESP_IDF_VERSION_VAL, for the IDF 5.x-only reset reasons
 #include <esp_wifi.h>
 #include "config.h"
 #include "config_api.h"
@@ -114,6 +115,41 @@ static const unsigned long DEBOUNCE_MS = 25;
 static const unsigned long CYCLE_SEGMENT_TIMEOUT_MS = 180UL * 1000UL; // max time to reach next sensor before fault
 static const unsigned long MQTT_RECONNECT_INTERVAL_MS = 5000;
 static const unsigned long WIFI_RECONNECT_INTERVAL_MS = 5000;
+// How long ONE association attempt gets before we tear it down and retry.
+// Added 2026-09-07 after a serial capture showed the retry logic destroying
+// its own in-progress connections: WL_CONNECTED means "got a DHCP lease",
+// not "associated", so on a weak link that associates in 3s but needs 10s
+// for DHCP, the old code fired a fresh scan+WiFi.begin() every
+// WIFI_RECONNECT_INTERVAL_MS and killed it every time. The capture shows
+// both failure modes verbatim - "sta is connecting, cannot set config"
+// (begin() silently doing nothing) and "STA currently connected.
+// Disconnecting... Reason: 8 - ASSOC_LEAVE" (us deauthing ourselves).
+// This is very likely the ASSOC_LEAVE loop this project has been chasing
+// since 2026-07-06.
+static const unsigned long WIFI_ATTEMPT_TIMEOUT_MS = 20000;
+// Single source of truth for TX power - setup() and the reconnect path used
+// to set different values (13dBm vs 19dBm), so the first connect and every
+// later one ran at different power. Higher costs current spikes; see the
+// notes in setup(). Weak-link install, so favour range.
+static const wifi_power_t WIFI_TX_POWER = WIFI_POWER_19dBm;
+// How long to keep retrying WiFi credentials that have NEVER once connected
+// before giving up and rebooting into the setup portal. Previously a wrong
+// SSID or a mistyped password retried forever, with no route back to the
+// portal except a serial console or the 10s manual-button hold.
+//
+// Deliberately gated on isWifiValidated(): once a network has connected at
+// least once it is retried indefinitely instead, because setup mode returns
+// early from both setup() and loop() - no state machine, no cycling, no
+// safety interlocks - so a transient router reboot must never be able to
+// take the litter box offline. Only *unproven* credentials can trigger this.
+//
+// 5 min. Was 3, raised once WIFI_ATTEMPT_TIMEOUT_MS made each attempt take
+// ~30s (scan + up to 20s connect + backoff) instead of ~8s - 3 min would
+// have been only ~6 attempts. A real capture on this install showed 17
+// attempts across 115s on a *valid* SSID at -82 dBm, so a tight bound here
+// would bounce a marginal-but-working network into AP mode, which is the
+// one outcome this must never produce.
+static const unsigned long WIFI_PROVISION_TIMEOUT_MS = 300000UL;
 static const unsigned long HEARTBEAT_INTERVAL_MS = 30UL * 1000UL;
 static const unsigned long SETUP_HOLD_MS = 10UL * 1000UL; // hold the cycle button this long to force setup mode
 
@@ -765,7 +801,12 @@ static void onWsEvent(AsyncWebSocket *server, AsyncWebSocketClient *client,
 // config_api.cpp) specifically so this never blocks loop() - a multi-
 // second blocking scan would delay the safety interlock checks that run
 // every iteration, which isn't acceptable here even briefly.
-enum class WifiConnectPhase { IDLE, SCANNING };
+enum class WifiConnectPhase { IDLE, SCANNING, CONNECTING };
+// Mirrors NVS "wifiOk" - see isWifiValidated(). File-scope rather than a
+// function-local static so the heartbeat can print it: whether the setup-mode
+// fallback is armed is otherwise invisible, and a silently-true value looks
+// exactly like the fallback being broken.
+static bool wifiCredentialsValidated = false;
 static WifiConnectPhase wifiConnectPhase = WifiConnectPhase::IDLE;
 
 // This macro forces the linker to execute this function during the initial boot loader phase.
@@ -790,13 +831,65 @@ static void connectWifiIfNeeded() {
                   attemptCount, millis(), WiFi.RSSI(), WiFi.channel());
     attemptCount = 0;
     wifiConnectPhase = WifiConnectPhase::IDLE;
+    if (!wifiCredentialsValidated) {
+      // First ever success on these credentials - from here on, outages are
+      // the network's problem, not the config's, so stop arming the fallback.
+      markWifiValidated();
+      wifiCredentialsValidated = true;
+      Serial.println("WiFi: credentials validated - future outages retry indefinitely");
+    }
   }
   wasConnected = isConnected;
   if (isConnected) return;
 
+  // Unproven credentials that never come up are a config error, not an
+  // outage - hand the user back the setup portal instead of retrying into
+  // the void. See WIFI_PROVISION_TIMEOUT_MS for why this is gated so tightly.
+  // millis() is time since boot, which is exactly the right clock here: a
+  // /save always reboots (see config_api.cpp), so "since boot" is "since the
+  // credentials were entered" in the provisioning case this exists for.
+  if (!wifiCredentialsValidated && millis() >= WIFI_PROVISION_TIMEOUT_MS) {
+    Serial.printf("WiFi: \"%s\" never connected in %lus and has never worked before - "
+                  "rebooting into setup mode\n",
+                  cfg.wifiSsid.c_str(), WIFI_PROVISION_TIMEOUT_MS / 1000);
+    motorStop(); // same precaution the OTA paths take before a restart
+    requestSetupModeAndRestart(); // does not return
+  }
+
+  // An attempt is already in flight - let it finish. Scanning or calling
+  // WiFi.begin() again here is what was breaking association and DHCP.
+  if (wifiConnectPhase == WifiConnectPhase::CONNECTING) {
+    if (millis() - lastAttempt < WIFI_ATTEMPT_TIMEOUT_MS) return;
+    Serial.printf("WiFi: attempt #%lu gave up after %lums - disconnecting cleanly before retry\n",
+                  attemptCount, WIFI_ATTEMPT_TIMEOUT_MS);
+    // Explicit teardown so the next WiFi.begin() isn't rejected with
+    // ESP_ERR_WIFI_STATE ("sta is connecting, cannot set config").
+    WiFi.disconnect(false /* leave radio on */, true /* erase driver's stored AP */);
+    wifiConnectPhase = WifiConnectPhase::IDLE;
+    lastAttempt = millis();
+    return;
+  }
+
   if (wifiConnectPhase == WifiConnectPhase::SCANNING) {
     int n = WiFi.scanComplete();
-    if (n == -1) return; // still scanning - check again next loop() iteration, don't block
+    if (n == WIFI_SCAN_RUNNING) return; // -1: check again next loop(), don't block
+
+    // Anything else negative is WIFI_SCAN_FAILED (-2) - the scan never
+    // produced a result at all, which is NOT the same as finding zero APs.
+    // Observed on the C6 while the driver was busy reconnecting. Reported as
+    // "scan saw -2 AP(s)" until this was split out; keep them distinct or the
+    // log actively misleads about whether the radio can hear anything.
+    if (n < 0) {
+      attemptCount++;
+      Serial.printf("WiFi: scan FAILED (%d, not a zero result) - falling back to a plain "
+                    "connect (attempt #%lu, t=%lums since boot)\n",
+                    n, attemptCount, millis());
+      WiFi.scanDelete();
+      WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
+      wifiConnectPhase = WifiConnectPhase::CONNECTING;
+      lastAttempt = millis();
+      return;
+    }
 
     int bestIdx = -1;
     for (int i = 0; i < n; i++) {
@@ -813,13 +906,18 @@ static void connectWifiIfNeeded() {
                     WiFi.BSSIDstr(bestIdx).c_str(), attemptCount, millis());
       WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str(), WiFi.channel(bestIdx), WiFi.BSSID(bestIdx));
     } else {
-      Serial.printf("WiFi: scan found no AP matching \"%s\" - trying a plain connect anyway "
-                    "(attempt #%lu, t=%lums since boot)\n",
-                    cfg.wifiSsid.c_str(), attemptCount, millis());
+      // Print the TOTAL AP count, not just "no match": 0 APs means the radio
+      // heard nothing at all (deaf receiver / antenna), while "12 APs but not
+      // yours" means the radio is fine and the SSID genuinely isn't on 2.4GHz
+      // or isn't up. Those need completely different fixes and the old message
+      // couldn't tell them apart.
+      Serial.printf("WiFi: scan saw %d AP(s) total, none matching \"%s\" - trying a plain "
+                    "connect anyway (attempt #%lu, t=%lums since boot)\n",
+                    n, cfg.wifiSsid.c_str(), attemptCount, millis());
       WiFi.begin(cfg.wifiSsid.c_str(), cfg.wifiPass.c_str());
     }
     WiFi.scanDelete();
-    wifiConnectPhase = WifiConnectPhase::IDLE;
+    wifiConnectPhase = WifiConnectPhase::CONNECTING;
     lastAttempt = millis();
     return;
   }
@@ -827,11 +925,14 @@ static void connectWifiIfNeeded() {
   if (millis() - lastAttempt < WIFI_RECONNECT_INTERVAL_MS) return;
   lastAttempt = millis();
   WiFi.mode(WIFI_STA);
+  // Power save off BEFORE associating, not just once connected. The 30s
+  // heartbeat's re-assert is gated on wifiUp, so while WiFi was down the
+  // driver sat in its core-3.x default - a serial capture showed
+  // "ps=min_modem" during this very loop, which is a poor state to be
+  // scanning and associating from on a marginal link.
+  WiFi.setSleep(false);
+  WiFi.setTxPower(WIFI_TX_POWER);
 
-  // Cap the transmission power (Options: 19.5, 17, 15, 13, 11, 8.5, 7, 5, 2)
-  // 15dBm or 13dBm drastically cuts current spikes while keeping decent range
-  WiFi.setTxPower(WIFI_POWER_13dBm); 
-  
   WiFi.scanNetworks(true /* async */);
   wifiConnectPhase = WifiConnectPhase::SCANNING;
 }
@@ -1503,6 +1604,19 @@ static const char *resetReasonName(esp_reset_reason_t reason) {
     case ESP_RST_DEEPSLEEP: return "DEEPSLEEP_WAKE";
     case ESP_RST_BROWNOUT: return "BROWNOUT";
     case ESP_RST_SDIO: return "SDIO";
+#if ESP_IDF_VERSION >= ESP_IDF_VERSION_VAL(5, 0, 0)
+    // IDF 5.x only, so guarded: [env:esp32dev] is still on Arduino core
+    // 2.0.17 / IDF 4.4, where these enum values don't exist and an
+    // unguarded case label wouldn't compile. ESP_RST_USB is what the C6's
+    // USB-Serial/JTAG bridge produces - i.e. what esptool and any serial
+    // monitor that toggles RTS cause - and it was showing up as
+    // "UNKNOWN (11)".
+    case ESP_RST_USB: return "USB_PERIPHERAL";
+    case ESP_RST_JTAG: return "JTAG";
+    case ESP_RST_EFUSE: return "EFUSE_ERROR";
+    case ESP_RST_PWR_GLITCH: return "POWER_GLITCH";
+    case ESP_RST_CPU_LOCKUP: return "CPU_LOCKUP";
+#endif
     default: return "UNKNOWN";
   }
 }
@@ -1546,6 +1660,12 @@ void setup() {
     return; // no state machine, no MQTT, no dashboard WS this boot
   }
 
+  wifiCredentialsValidated = isWifiValidated();
+  Serial.printf("WiFi: credentials for \"%s\" %s previously connected - setup-mode fallback %s\n",
+                cfg.wifiSsid.c_str(),
+                wifiCredentialsValidated ? "HAVE" : "have NOT",
+                wifiCredentialsValidated ? "disarmed" : "armed");
+
   prefs.begin("lr2redux", false);
   cycleCount = prefs.getULong("cycles", 0);
   drawerCycles = prefs.getULong("drawerCycles", 0);
@@ -1566,24 +1686,25 @@ void setup() {
   // clean power-on reset the BSS is already zeroed by the ROM bootloader,
   // so this teardown is skipped there to avoid needlessly delaying boot.
   esp_reset_reason_t resetReason = esp_reset_reason();
-  bool dirtyReset = resetReason == ESP_RST_BROWNOUT ||
-                     resetReason == ESP_RST_PANIC ||
-                     resetReason == ESP_RST_INT_WDT ||
-                     resetReason == ESP_RST_TASK_WDT ||
-                     resetReason == ESP_RST_WDT ||
-                     resetReason == ESP_RST_EXT ||
-                     // ESP_RST_SW added 2026-08-15: an OTA reboot and every
-                     // ESP.restart() (including the web Settings "Save &
-                     // reboot" path) land here. The reason the teardown is
-                     // skipped on a clean power-on is that the ROM
-                     // bootloader zeroes BSS - but a *software* reset does
-                     // not clear RAM, so it leaves lwIP's static pools in
-                     // exactly the indeterminate state this teardown
-                     // exists to fix. Observed for real: an espota flash
-                     // completed cleanly and the board then failed to
-                     // rejoin WiFi at all until it was physically power
-                     // cycled (2026-08-15).
-                     resetReason == ESP_RST_SW;
+  // Inverted 2026-09-07: this used to enumerate the *dirty* reasons, and had
+  // already been patched twice for cases it missed (ESP_RST_SW in August,
+  // and ESP_RST_USB - which the C6's USB-Serial/JTAG bridge produces on
+  // every esptool run and every serial monitor that toggles RTS - was
+  // silently missing until its "UNKNOWN (11)" was tracked down today).
+  //
+  // The underlying rule has only ever had one clean case: a true power-on
+  // has its BSS zeroed by the ROM bootloader, so lwIP's static pools start
+  // clean and the teardown is unnecessary. EVERY other reset leaves RAM as
+  // the previous boot left it. So test for the clean case and treat all
+  // else as dirty - that way a reset reason nobody has thought of yet gets
+  // the safe treatment by default instead of the unsafe one. Deep sleep is
+  // the other genuine exception (unused in this project, but it resumes a
+  // deliberately preserved state rather than a stale one).
+  //
+  // Costs ~200ms on boot when it fires; the failure it prevents is the
+  // board never rejoining WiFi at all until physically power cycled.
+  bool dirtyReset = !(resetReason == ESP_RST_POWERON ||
+                      resetReason == ESP_RST_DEEPSLEEP);
   // Printed unconditionally (not just on dirty resets) so every serial
   // capture has boot cause available for free - useful diagnostic context
   // on its own, e.g. for correlating WiFi connection problems against
@@ -1615,7 +1736,7 @@ void setup() {
 
   // Cap the transmission power (Options: 19.5, 17, 15, 13, 11, 8.5, 7, 5, 2)
   // 15dBm or 13dBm drastically cuts current spikes while keeping decent range
-  WiFi.setTxPower(WIFI_POWER_13dBm); 
+  WiFi.setTxPower(WIFI_TX_POWER); 
 
   ws.onEvent(onWsEvent);
   server.addHandler(&ws);
@@ -1698,9 +1819,10 @@ void loop() {
     // queries) while unicast keeps working - see wifiPowerSaveName().
     // Cheap and idempotent, so there's no reason to be clever about it.
     if (wifiUp) WiFi.setSleep(false);
-    Serial.printf("Heartbeat: uptime=%lus, freeHeap=%u, state=%s, wifi=%s, rssi=%s, ps=%s\n",
+    Serial.printf("Heartbeat: uptime=%lus, freeHeap=%u, state=%s, wifi=%s, rssi=%s, ps=%s, wifiOk=%d\n",
                   millis() / 1000, ESP.getFreeHeap(), stateName(state), wifiUp ? "up" : "down",
-                  wifiUp ? (String(WiFi.RSSI()) + "dBm").c_str() : "n/a", wifiPowerSaveName());
+                  wifiUp ? (String(WiFi.RSSI()) + "dBm").c_str() : "n/a", wifiPowerSaveName(),
+                  wifiCredentialsValidated ? 1 : 0);
   }
 
   // periodic broadcast so uptime/telemetry stays fresh in the dashboard even
